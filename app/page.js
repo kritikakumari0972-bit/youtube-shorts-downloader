@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import styles from './styles.module.css';
 
+const API_BASE = '/.netlify/functions';
 const defaultThumbnail = 'https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?auto=format&fit=crop&w=900&q=80';
 
 export default function HomePage() {
@@ -25,7 +26,9 @@ export default function HomePage() {
     setPreview(null);
 
     try {
-      const res = await fetch(`/api/preview?url=${encodeURIComponent(url)}`);
+      const res = await fetch(
+        `${API_BASE}/preview?url=${encodeURIComponent(url)}`
+      );
       const data = await res.json();
 
       if (!res.ok) {
@@ -56,7 +59,7 @@ export default function HomePage() {
         quality: format === 'video' ? selectedQuality : 'best',
       });
 
-      window.open(`/api/download?${params}`, '_blank');
+      window.open(`${API_BASE}/download?${params}`, '_blank');
       
       setTimeout(() => setDownloadingFormat(null), 2000);
     } catch (err) {
@@ -88,6 +91,7 @@ export default function HomePage() {
             <div className={styles.titleSection}>
               <h1 className={styles.title}>🎥 YouTube Downloader</h1>
               <p className={styles.subtitle}>Download Shorts & Videos with preview, multiple qualities & audio extraction</p>
+              <p className={styles.poweredBy}>⚡ Powered by Netlify Functions</p>
             </div>
           </header>
 
@@ -239,7 +243,7 @@ export default function HomePage() {
                       onClick={downloadThumbnail}
                       disabled={!preview}
                     >
-                      📸 Download Thumbnail (JPG)
+                      📷 Download Thumbnail (JPG)
                     </button>
                   </div>
                 )}
@@ -271,6 +275,7 @@ export default function HomePage() {
                   <li>✅ High-res thumbnail download</li>
                   <li>✅ Fast & reliable streaming</li>
                   <li>✅ No registration required</li>
+                  <li>✅ Netlify Functions powered</li>
                 </ul>
               </div>
 

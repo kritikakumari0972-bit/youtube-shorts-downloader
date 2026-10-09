@@ -1,21 +1,23 @@
 {
-  "name": "youtube-shorts-downloader",
-  "version": "2.0.0",
+  "name": "youtube-shorts-downloader-netlify",
+  "version": "2.1.0",
+  "description": "YouTube Shorts & Videos Downloader with Netlify Functions support",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "netlify:dev": "netlify dev"
   },
   "dependencies": {
     "next": "^14.2.15",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "ytdl-core": "^4.11.5",
-    "axios": "^1.7.2"
+    "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
+    "@netlify/functions": "^2.4.0",
     "eslint": "^8.57.0",
     "eslint-config-next": "^14.2.15"
   }
