@@ -1,0 +1,36 @@
+# YouTube Shorts Downloader
+
+A lightweight Next.js app that lets users paste a public YouTube Shorts URL, view a video preview, and download the MP4 directly.
+
+## Features
+
+- Paste YouTube Shorts URL
+- Fetch preview metadata
+- Show thumbnail and basic video info
+- Download MP4 file directly
+- Vercel-ready Node.js server setup
+
+## Local development
+
+```bash
+npm install
+npm run dev
+```
+
+Then open: http://localhost:3000
+
+## Deploy to Vercel
+
+1. Push this repo to GitHub
+2. Import it into Vercel
+3. Vercel will detect Next.js automatically
+4. Deploy
+
+## Notes
+
+- Works best with public videos
+- Use only for videos you are allowed to download and save
+
+## Important
+
+This tool relies on YouTube metadata and streaming endpoints. Some videos may block download access or change their format feeds over time.
