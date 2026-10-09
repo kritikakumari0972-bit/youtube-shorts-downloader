@@ -1,4 +1,5 @@
-module.exports = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   reactStrictMode: true,
   images: {
     remotePatterns: [
@@ -8,4 +9,7 @@ module.exports = {
       },
     ],
   },
+  serverExternalPackages: ['ytdl-core'],
 };
+
+export default nextConfig;

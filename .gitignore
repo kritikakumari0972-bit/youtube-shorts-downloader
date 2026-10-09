@@ -4,3 +4,6 @@ out
 npm-debug.log*
 .env*
 .DS_Store
+*.mp4
+*.mp3
+.vercel

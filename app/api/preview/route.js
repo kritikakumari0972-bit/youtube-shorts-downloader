@@ -1,13 +1,15 @@
 import ytdl from 'ytdl-core';
 
 export const runtime = 'nodejs';
+export const maxDuration = 30;
 
-function sanitizeTitle(value) {
-  return (value || 'youtube-short')
-    .replace(/[<>:"/\\|?*]+/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 90) || 'youtube-short';
+function formatDuration(seconds) {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (hrs > 0) return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
 export async function GET(request) {
@@ -18,23 +20,49 @@ export async function GET(request) {
     return Response.json({ error: 'Missing YouTube URL.' }, { status: 400 });
   }
 
+  // Validate URL
+  if (!ytdl.validateURL(url)) {
+    return Response.json({ error: 'Invalid YouTube URL. Please provide a valid YouTube link.' }, { status: 400 });
+  }
+
   try {
     const info = await ytdl.getBasicInfo(url);
-    const video = info.videoDetails;
-    const formats = info.formats.filter((f) => f.hasVideo && f.hasAudio && f.container === 'mp4');
-    const bestFormat = formats.sort((a, b) => (Number(b.qualityLabel?.replace(/[^0-9]/g, '')) || 0) - (Number(a.qualityLabel?.replace(/[^0-9]/g, '')) || 0))[0] || info.formats.find((f) => f.hasVideo && f.hasAudio);
+    const videoDetails = info.videoDetails;
+    
+    // Get all available formats
+    const allFormats = info.formats
+      .filter(f => f.hasVideo && f.hasAudio)
+      .sort((a, b) => {
+        const qualityA = parseInt(b.qualityLabel?.replace(/[^0-9]/g, '') || 0);
+        const qualityB = parseInt(a.qualityLabel?.replace(/[^0-9]/g, '') || 0);
+        return qualityA - qualityB;
+      });
+
+    // Get thumbnail
+    const thumbnails = videoDetails.thumbnails || [];
+    const thumbnail = thumbnails[thumbnails.length - 1]?.url || null;
 
     return Response.json({
-      title: video.title,
-      author: video.ownerChannelName,
-      thumbnail: video.thumbnails?.at(-1)?.url || video.thumbnail?.thumbnails?.at(-1)?.url || '',
-      duration: Number(video.lengthSeconds || 0),
-      quality: bestFormat?.qualityLabel || 'Best available',
+      title: videoDetails.title,
+      author: videoDetails.author?.name || videoDetails.ownerChannelName || 'Unknown',
+      thumbnail: thumbnail,
+      duration: Number(videoDetails.lengthSeconds || 0),
+      durationFormatted: formatDuration(Number(videoDetails.lengthSeconds || 0)),
+      views: Number(videoDetails.viewCount || 0),
+      channelId: videoDetails.channelId,
+      videoId: videoDetails.videoId,
+      isLive: videoDetails.isLiveContent || false,
+      formats: allFormats.slice(0, 10).map(f => ({
+        qualityLabel: f.qualityLabel,
+        mimeType: f.mimeType,
+        contentLength: f.contentLength,
+      })),
       url,
     });
   } catch (error) {
+    console.error('[Preview Error]:', error);
     return Response.json(
-      { error: 'Unable to load the video. Please make sure the URL is public and valid.' },
+      { error: 'Unable to load the video. Make sure the URL is public and valid.' },
       { status: 400 }
     );
   }
