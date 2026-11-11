@@ -6,12 +6,12 @@ NOVA FETCH is being developed as its own product and codebase. It does not call 
 
 The project has two layers:
 
-1. **NOVA Native** — first-party code in this repository for direct HTTP media files, public HTML5/Open Graph/JSON-LD discovery, static unencrypted HLS with quality selection and separate audio rendition muxing, DASH SegmentList and SegmentTemplate, download queue/history, and local MP3 conversion through FFmpeg.
+1. **NOVA Native** — first-party code in this repository for direct HTTP media files, public HTML5/Open Graph/JSON-LD discovery, static unencrypted HLS with quality selection, separate audio rendition muxing and HTTP byte-range segments, DASH SegmentList and SegmentTemplate with separate audio/video adaptation muxing, bounded request retries, download queue/history, and local MP3 conversion through FFmpeg.
 2. **Local site-extractor compatibility pack** — yt-dlp runs as a local Python library inside the same application process. It is not a remote API, but it is third-party source code and remains separately licensed. It expands website coverage when a website has a maintained extractor.
 
 ## Important compatibility boundary
 
-No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, public HTML5 pages that expose direct media in HTML/Open Graph/JSON-LD metadata, static unencrypted HLS playlists (including quality selection and a separately declared audio rendition), and one-period static DASH manifests using SegmentList, SegmentTemplate/SegmentTimeline, or a direct BaseURL. Live media, encrypted streams, HLS byte ranges, DASH SegmentBase, multi-Period DASH, and separate audio/video DASH AdaptationSets are not implemented by the native engine yet.
+No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, public HTML5 pages that expose direct media in HTML/Open Graph/JSON-LD metadata, static unencrypted HLS playlists (including quality selection, separately declared audio renditions, initialization maps and explicit or implicit byte ranges), and one-period static DASH manifests using SegmentList, SegmentTemplate/SegmentTimeline, or a direct BaseURL. When DASH audio and video are split into separate AdaptationSets, NOVA selects the requested video quality and a compatible audio representation, downloads both tracks and muxes them locally with FFmpeg. Live media, encrypted streams, DASH SegmentBase and multi-Period DASH are not implemented by the native engine yet. Native subtitle extraction is not implemented; subtitle requests use the local compatibility extractor in Automatic mode.
 
 Automatic mode uses NOVA Native first for direct media/manifest URLs and public HTML5 pages with a directly exposed media source, then the local compatibility extractor when appropriate. It does not execute the page's JavaScript or use browser cookies. For pages requiring custom site-specific logic, it uses the locally installed compatibility extractor. No outside downloader service is required.
 
@@ -23,8 +23,10 @@ NOVA FETCH does not bypass DRM, paywalls, private accounts, login gates, or othe
 - Paste up to 10 source links in one batch
 - Metadata preview for supported sources
 - Native direct-file downloads
-- Native static HLS with quality selection and separate audio renditions
+- Native static HLS with quality selection, separate audio renditions, initialization maps and HTTP byte-range support
 - Native DASH SegmentList, SegmentTemplate and SegmentTimeline downloads
+- Separate DASH audio/video adaptation selection and local FFmpeg muxing
+- Bounded retry handling for temporary network and server errors
 - Local MP3 conversion with FFmpeg
 - Optional local website extractor pack for supported public sources
 - Quality selection, playlists and subtitle export through the compatibility pack
@@ -81,7 +83,7 @@ Set the variables in `.env.example` in your shell before starting. Open **http:/
 ## Engine selection
 
 - **Automatic · NOVA first** — use NOVA Native for direct media/HLS/DASH links; use the local compatibility pack for supported website pages.
-- **NOVA Native only** — first-party native engine and registered first-party adapters only. It accepts direct media files, exposed HTML5 media, and the supported HLS/DASH subset.
+- **NOVA Native only** — first-party native engine and registered first-party adapters only. It accepts direct media files, exposed HTML5 media, and the supported HLS/DASH subset; native subtitle extraction is not yet included.
 - **Local site-extractor pack** — use the local yt-dlp compatibility component for its supported extractors.
 
 The optional extractor component is installed in the same container. It does not send a request to a third-party downloader service. It does request the original media site and media CDN, as any downloader must.
