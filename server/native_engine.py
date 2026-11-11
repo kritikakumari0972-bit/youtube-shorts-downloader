@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 from email.message import Message
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 from xml.etree import ElementTree as ET
@@ -93,6 +94,111 @@ def preview(url: str) -> dict:
         "is_live": False,
         "playlist_count": None,
     }
+
+
+class _MediaPageParser(HTMLParser):
+    """Extract directly exposed HTML5 media URLs and Open Graph metadata."""
+
+    MEDIA_META = {
+        "og:video", "og:video:url", "og:video:secure_url",
+        "twitter:player:stream",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.candidates: list[tuple[str, str]] = []
+        self.title = ""
+        self.creator = ""
+        self.thumbnail = ""
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = {key.lower(): value or "" for key, value in attrs}
+        tag = tag.lower()
+        if tag == "title":
+            self._in_title = True
+        if tag == "meta":
+            key = (attrs.get("property") or attrs.get("name") or "").lower()
+            value = attrs.get("content", "").strip()
+            if key in self.MEDIA_META and value:
+                self.candidates.append((value, attrs.get("type", "")))
+            elif key in {"og:title", "twitter:title"} and value and not self.title:
+                self.title = value
+            elif key in {"og:video:secure_url", "og:image", "twitter:image"} and value and not self.thumbnail:
+                if key != "og:video:secure_url":
+                    self.thumbnail = value
+            elif key in {"author", "article:author"} and value and not self.creator:
+                self.creator = value
+        if tag in {"video", "audio", "source"} and attrs.get("src"):
+            self.candidates.append((attrs["src"].strip(), attrs.get("type", "")))
+        if tag == "video" and attrs.get("poster") and not self.thumbnail:
+            self.thumbnail = attrs["poster"].strip()
+        if tag == "link" and attrs.get("href"):
+            rel = attrs.get("rel", "").lower().split()
+            mime = attrs.get("type", "").lower()
+            if "alternate" in rel and any(marker in mime for marker in ("mpegurl", "dash+xml")):
+                self.candidates.append((attrs["href"].strip(), mime))
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title and data.strip() and not self.title:
+            self.title = data.strip()
+
+
+def resolve_html5_media(url: str) -> dict | None:
+    """Resolve public HTML pages that expose a direct video/audio source in markup.
+
+    This intentionally does not run JavaScript, sign requests, read browser cookies,
+    or access private/app-only streams.
+    """
+    page_url = validate_external_url(url)
+    with httpx.Client(timeout=httpx.Timeout(30, connect=15), follow_redirects=False) as client:
+        response, final_url = _request_following_redirects(client, page_url, stream=True)
+        try:
+            content_type = response.headers.get("content-type", "").lower()
+            if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml")):
+                return None
+            chunks = []
+            size = 0
+            for chunk in response.iter_bytes(64 * 1024):
+                size += len(chunk)
+                if size > MAX_MANIFEST_BYTES:
+                    raise NativeEngineError("The source HTML is larger than the configured limit.")
+                chunks.append(chunk)
+        finally:
+            response.close()
+
+    try:
+        html = b"".join(chunks).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    parser = _MediaPageParser()
+    parser.feed(html)
+
+    for raw_url, mime in parser.candidates:
+        candidate = urljoin(final_url, raw_url)
+        try:
+            candidate = validate_external_url(candidate)
+        except Exception:
+            continue
+        path = urlsplit(candidate).path.lower()
+        known_manifest = path.endswith((".m3u8", ".mpd"))
+        known_media = is_native_url(candidate)
+        typed_media = mime.lower().startswith(("video/", "audio/")) or any(
+            marker in mime.lower() for marker in ("mpegurl", "dash+xml")
+        )
+        if known_media or known_manifest or typed_media:
+            return {
+                "media_url": candidate,
+                "title": (parser.title or Path(unquote(urlsplit(candidate).path)).name or "Web media")[:240],
+                "creator": parser.creator[:160] or "Public HTML5 source",
+                "thumbnail": urljoin(final_url, parser.thumbnail) if parser.thumbnail else None,
+                "source": "NOVA HTML5 resolver",
+            }
+    return None
 
 
 def _read_manifest(client: httpx.Client, url: str) -> tuple[str, str]:
