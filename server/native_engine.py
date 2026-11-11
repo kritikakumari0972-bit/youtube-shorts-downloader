@@ -760,9 +760,9 @@ def download(job: dict, on_update) -> Path:
     with httpx.Client(timeout=httpx.Timeout(60, connect=20), follow_redirects=False) as client:
         path = urlsplit(url).path.lower()
         if path.endswith(".m3u8"):
-            output = _download_hls(client, url, job_dir, job["id"], on_update)
+            output = _download_hls(client, url, job_dir, job["id"], on_update, quality=job.get("quality", "best"))
         elif path.endswith(".mpd"):
-            output = _download_dash(client, url, job_dir, job["id"], on_update)
+            output = _download_dash(client, url, job_dir, job["id"], on_update, quality=job.get("quality", "best"))
         else:
             response, final_url = _request_following_redirects(client, url, stream=True)
             try:
