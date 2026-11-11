@@ -47,7 +47,7 @@ Every range request must receive HTTP 206 Partial Content and an exact matching 
 | Text/subtitle-only AdaptationSets | Not downloaded by the native media path |
 | ContentProtection / DRM | Rejected |
 
-A separate audio/video DASH source requires local FFmpeg for the final stream-copy mux. NOVA does not transcode the tracks during muxing. If the selected tracks are incompatible with the chosen MP4 container, FFmpeg reports the failure rather than claiming a successful output.
+A separate audio/video DASH source requires local FFmpeg for the final stream-copy mux. NOVA does not transcode the tracks during muxing. It chooses WebM when both selected tracks are WebM, Matroska for mixed WebM/non-WebM tracks, and MP4 for other track pairs. FFmpeg errors are surfaced instead of claiming a successful output.
 
 ## Network and resource safety
 
