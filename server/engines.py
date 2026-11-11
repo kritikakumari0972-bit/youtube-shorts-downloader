@@ -30,7 +30,7 @@ def tool_status() -> dict[str, Any]:
         version = "installed" if yt_dlp is not None else "not installed"
     registry = get_registry()
     return {
-        "native_engine": "NOVA Native v1.1",
+        "native_engine": "NOVA Native v1.2 · Extractor Core",
         "extractors": registry.names(),
         "yt_dlp": version,
         "ffmpeg": bool(shutil.which("ffmpeg")),
