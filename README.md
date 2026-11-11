@@ -6,12 +6,12 @@ NOVA FETCH is being developed as its own product and codebase. It does not call 
 
 The project has two layers:
 
-1. **NOVA Native** — first-party code in this repository for direct HTTP media files, static unencrypted HLS playlists, a supported subset of static MPEG-DASH manifests, download queue/history, and local MP3 conversion through the installed FFmpeg binary.
+1. **NOVA Native** — first-party code in this repository for direct HTTP media files, public HTML5/Open Graph/JSON-LD discovery, static unencrypted HLS with quality selection and separate audio rendition muxing, DASH SegmentList and SegmentTemplate, download queue/history, and local MP3 conversion through FFmpeg.
 2. **Local site-extractor compatibility pack** — yt-dlp runs as a local Python library inside the same application process. It is not a remote API, but it is third-party source code and remains separately licensed. It expands website coverage when a website has a maintained extractor.
 
 ## Important compatibility boundary
 
-No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, public HTML5 pages that expose a direct video/audio source in markup or Open Graph metadata, static HLS playlists without encryption, and static DASH manifests using SegmentList or a direct BaseURL. DASH SegmentTemplate/SegmentBase, live playlists, separate audio/video DASH adaptations, HLS byte ranges and protected streams are not implemented by NOVA Native yet.
+No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, public HTML5 pages that expose direct media in HTML/Open Graph/JSON-LD metadata, static unencrypted HLS playlists (including quality selection and a separately declared audio rendition), and one-period static DASH manifests using SegmentList, SegmentTemplate/SegmentTimeline, or a direct BaseURL. Live media, encrypted streams, HLS byte ranges, DASH SegmentBase, multi-Period DASH, and separate audio/video DASH AdaptationSets are not implemented by the native engine yet.
 
 Automatic mode uses NOVA Native first for direct media/manifest URLs and public HTML5 pages with a directly exposed media source, then the local compatibility extractor when appropriate. It does not execute the page's JavaScript or use browser cookies. For pages requiring custom site-specific logic, it uses the locally installed compatibility extractor. No outside downloader service is required.
 
@@ -81,7 +81,7 @@ Set the variables in `.env.example` in your shell before starting. Open **http:/
 ## Engine selection
 
 - **Automatic · NOVA first** — use NOVA Native for direct media/HLS/DASH links; use the local compatibility pack for supported website pages.
-- **NOVA Native only** — first-party native engine only. It accepts direct media files and the supported HLS/DASH subset.
+- **NOVA Native only** — first-party native engine and registered first-party adapters only. It accepts direct media files, exposed HTML5 media, and the supported HLS/DASH subset.
 - **Local site-extractor pack** — use the local yt-dlp compatibility component for its supported extractors.
 
 The optional extractor component is installed in the same container. It does not send a request to a third-party downloader service. It does request the original media site and media CDN, as any downloader must.
@@ -131,7 +131,7 @@ Provider values: `auto`, `native`, `yt-dlp`.
 | `MAX_ACTIVE_JOBS` | `2` | Number of queue workers. |
 | `MAX_QUEUED_JOBS` | `12` | Maximum active/queued jobs. |
 | `MAX_DOWNLOAD_GB` | `8` | Per-file download cap. |
-| `DATA_DIR` | local / `/data` in Docker | SQLite database and media directory. |
+| `DATA_DIR` | local / `/data` in Docker | SQLite database and media directory. |\n| `NOVA_EXTRACTOR_MODULES` | empty | Comma-separated Python module import paths, each exposing `register(registry)`. |
 
 ## Tests
 
