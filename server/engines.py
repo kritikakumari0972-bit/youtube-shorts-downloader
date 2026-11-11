@@ -30,7 +30,7 @@ def tool_status() -> dict[str, Any]:
         version = "installed" if yt_dlp is not None else "not installed"
     registry = get_registry()
     return {
-        "native_engine": "NOVA Native v1.3 · Multi-track Core",
+        "native_engine": "NOVA Native v1.4 · HLS WebVTT Core",
         "extractors": registry.names(),
         "yt_dlp": version,
         "ffmpeg": bool(shutil.which("ffmpeg")),
@@ -266,9 +266,9 @@ def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Pat
     if provider == "yt-dlp":
         return _download_with_ytdlp(job, on_update)
 
-    if job.get("subtitles"):
-        if provider == "native":
-            raise RuntimeError("NOVA Native does not extract subtitles yet. Choose Automatic or the local site-extractor pack.")
+    if job.get("subtitles") and provider != "native":
+        # Automatic mode uses the local site-extractor pack for the broadest
+        # subtitle coverage. Native mode supports declared static HLS WebVTT.
         return _download_with_ytdlp(job, on_update)
 
     match = get_registry().extract(job["url"])
