@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engines, store
+from . import engines, native_engine, store
 from .archives import package_subtitles
 from .engines import DownloadCancelled
 from .security import UnsafeURLError, safe_filename, validate_external_url
@@ -38,7 +38,7 @@ class DownloadRequest(BaseModel):
     mode: Literal["video", "audio"] = "video"
     quality: Literal["best", "2160", "1440", "1080", "720", "480", "360", "240", "144"] = "best"
     container: Literal["mp4", "mkv", "webm"] = "mp4"
-    provider: Literal["auto", "yt-dlp", "cobalt"] = "auto"
+    provider: Literal["auto", "native", "yt-dlp"] = "auto"
     playlist: bool = False
     subtitles: bool = False
     subtitle_lang: str = Field(default="en", min_length=2, max_length=12)
@@ -87,6 +87,9 @@ async def worker():
 
             def update(**changes):
                 store.update_job(jid, **changes)
+                current_state = store.get_job(jid) or {}
+                if current_state.get("cancel_requested"):
+                    raise DownloadCancelled("Download cancelled by user.")
 
             try:
                 output = await asyncio.to_thread(engines.perform_download, job, update)
@@ -164,8 +167,6 @@ async def preview(url: str):
 async def create_download(body: DownloadRequest, request: Request):
     if not body.rights_confirmed:
         raise HTTPException(400, "Confirm you own the media or have permission to save it.")
-    if body.provider == "cobalt" and body.subtitles:
-        raise HTTPException(400, "Subtitle export uses yt-dlp. Choose Automatic or yt-dlp for this job.")
     try:
         url = validate_external_url(body.url)
     except UnsafeURLError as exc:
@@ -174,8 +175,8 @@ async def create_download(body: DownloadRequest, request: Request):
     active = sum(1 for item in store.list_jobs(500) if item.get("status") in {"queued", "downloading", "processing"})
     if active >= QUEUE_LIMIT:
         raise HTTPException(429, "The queue is full. Let a few downloads finish first.")
-    if body.provider == "cobalt" and not engines.tool_status()["cobalt_configured"]:
-        raise HTTPException(400, "Cobalt is not configured on this server.")
+    if body.provider == "native" and not native_engine.is_native_url(url):
+        raise HTTPException(400, "NOVA Native accepts direct media files and standard HLS/DASH manifest URLs. Use Automatic for supported website pages.")
     jid = uuid.uuid4().hex[:12]
     job = {
         "id": jid, "title": "Queued media", "creator": "", "url": url,
