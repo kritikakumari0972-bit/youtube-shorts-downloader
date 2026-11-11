@@ -500,3 +500,21 @@ def test_hls_native_subtitles_require_master_playlist(tmp_path, monkeypatch):
                 client, "https://cdn.example/direct.m3u8", tmp_path, "no-subs",
                 lambda **kwargs: None, subtitles=True
             )
+
+
+def test_webvtt_timestamp_map_unwraps_mpegts_33_bit_rollover():
+    before_wrap = (
+        b"WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:8589889592\n\n"
+        b"00:00:00.000 --> 00:00:00.250\nBefore rollover\n"
+    )
+    after_wrap = (
+        b"WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:45000\n\n"
+        b"00:00:00.000 --> 00:00:00.250\nAfter rollover\n"
+    )
+
+    result = native_engine._merge_webvtt_segments([before_wrap, after_wrap])
+    times = [line for line in result.splitlines() if "-->" in line]
+
+    assert len(times) == 2
+    assert times[0].startswith("26:30:43.")
+    assert times[1].startswith("26:30:44.")
