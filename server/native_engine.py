@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import re
@@ -110,6 +111,9 @@ class _MediaPageParser(HTMLParser):
         self.title = ""
         self.creator = ""
         self.thumbnail = ""
+        self.jsonld_documents: list[object] = []
+        self._jsonld_chunks: list[str] = []
+        self._in_jsonld = False
         self._in_title = False
 
     def handle_starttag(self, tag, attrs):
@@ -117,6 +121,9 @@ class _MediaPageParser(HTMLParser):
         tag = tag.lower()
         if tag == "title":
             self._in_title = True
+        if tag == "script" and attrs.get("type", "").lower().split(";", 1)[0].strip() == "application/ld+json":
+            self._in_jsonld = True
+            self._jsonld_chunks = []
         if tag == "meta":
             key = (attrs.get("property") or attrs.get("name") or "").lower()
             value = attrs.get("content", "").strip()
@@ -140,10 +147,23 @@ class _MediaPageParser(HTMLParser):
                 self.candidates.append((attrs["href"].strip(), mime))
 
     def handle_endtag(self, tag):
-        if tag.lower() == "title":
+        tag = tag.lower()
+        if tag == "title":
             self._in_title = False
+        elif tag == "script" and self._in_jsonld:
+            raw = "".join(self._jsonld_chunks).strip()
+            self._in_jsonld = False
+            self._jsonld_chunks = []
+            if raw:
+                try:
+                    self.jsonld_documents.append(json.loads(raw))
+                except (ValueError, TypeError):
+                    # Pages frequently contain malformed unrelated JSON-LD blocks.
+                    pass
 
     def handle_data(self, data):
+        if self._in_jsonld:
+            self._jsonld_chunks.append(data)
         if self._in_title and data.strip() and not self.title:
             self.title = data.strip()
 
@@ -177,6 +197,50 @@ def resolve_html5_media(url: str) -> dict | None:
         return None
     parser = _MediaPageParser()
     parser.feed(html)
+
+    def visit_jsonld(node):
+        if isinstance(node, list):
+            for child in node:
+                yield from visit_jsonld(child)
+        elif isinstance(node, dict):
+            yield node
+            graph = node.get("@graph")
+            if graph is not None:
+                yield from visit_jsonld(graph)
+            for key, value in node.items():
+                if key != "@graph" and isinstance(value, (dict, list)):
+                    yield from visit_jsonld(value)
+
+    for document in parser.jsonld_documents:
+        for item in visit_jsonld(document):
+            raw_types = item.get("@type", [])
+            types = {raw_types} if isinstance(raw_types, str) else set(raw_types or [])
+            if not types.intersection({"VideoObject", "AudioObject", "MediaObject"}):
+                continue
+            candidate = item.get("contentUrl")
+            if isinstance(candidate, dict):
+                candidate = candidate.get("@id") or candidate.get("url")
+            mime = str(item.get("encodingFormat") or item.get("fileFormat") or item.get("mimeType") or "")
+            if isinstance(candidate, str) and candidate.strip():
+                parser.candidates.append((candidate.strip(), mime))
+            if not parser.title and item.get("name"):
+                parser.title = str(item["name"])[:240]
+            author = item.get("author") or item.get("creator")
+            if not parser.creator and author:
+                if isinstance(author, list):
+                    author = author[0] if author else ""
+                if isinstance(author, dict):
+                    author = author.get("name") or author.get("@id") or ""
+                if isinstance(author, str):
+                    parser.creator = author[:160]
+            thumbnail = item.get("thumbnailUrl") or item.get("thumbnail")
+            if not parser.thumbnail and thumbnail:
+                if isinstance(thumbnail, list):
+                    thumbnail = thumbnail[0] if thumbnail else ""
+                if isinstance(thumbnail, dict):
+                    thumbnail = thumbnail.get("url") or thumbnail.get("@id") or ""
+                if isinstance(thumbnail, str):
+                    parser.thumbnail = thumbnail
 
     for raw_url, mime in parser.candidates:
         candidate = urljoin(final_url, raw_url)
