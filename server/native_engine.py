@@ -308,25 +308,25 @@ def _parse_hls_attrs(value: str) -> dict[str, str]:
     return attrs
 
 
-def _download_hls(client: httpx.Client, url: str, job_dir: Path, job_id: str, on_update) -> Path:
-    text, final_url = _read_manifest(client, url)
+def _download_hls_media_playlist(
+    client: httpx.Client,
+    playlist_url: str,
+    target: Path,
+    on_update,
+    state: dict,
+) -> Path:
+    text, final_url = _read_manifest(client, playlist_url)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    variants = []
-    for index, line in enumerate(lines):
-        if line.startswith("#EXT-X-STREAM-INF:") and index + 1 < len(lines):
-            attrs = _parse_hls_attrs(line.split(":", 1)[1])
-            if attrs.get("AUDIO"):
-                raise NativeEngineError("This HLS source separates audio into another playlist; native HLS muxing is not implemented yet.")
-            variants.append((int(attrs.get("BANDWIDTH", "0") or 0), urljoin(final_url, lines[index + 1])))
-    if variants:
-        variants.sort(reverse=True)
-        return _download_hls(client, variants[0][1], job_dir, job_id, on_update)
-
+    if not lines or lines[0] != "#EXTM3U":
+        raise NativeEngineError("The HLS media playlist is malformed.")
+    if any(line.startswith("#EXT-X-STREAM-INF:") for line in lines):
+        raise NativeEngineError("Nested HLS master playlists are not supported yet.")
     if "#EXT-X-ENDLIST" not in lines:
         raise NativeEngineError("Live or unfinished HLS playlists are not supported by NOVA Native yet.")
     if any(line.startswith("#EXT-X-BYTERANGE") for line in lines):
         raise NativeEngineError("This HLS playlist uses byte ranges, which NOVA Native does not support yet.")
+
     for line in lines:
         if line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:")):
             method = _parse_hls_attrs(line.split(":", 1)[1]).get("METHOD", "")
@@ -347,8 +347,6 @@ def _download_hls(client: httpx.Client, url: str, job_dir: Path, job_id: str, on
     if not segments or len(segments) > MAX_SEGMENTS:
         raise NativeEngineError("The HLS playlist is empty or exceeds the segment limit.")
 
-    target = job_dir / f"nova-native-{job_id}{'.mp4' if init_uri else '.ts'}"
-    state = {"total": 0}
     with target.open("wb") as output:
         if init_uri:
             _write_resource(client, init_uri, output, on_update, state)
@@ -356,6 +354,105 @@ def _download_hls(client: httpx.Client, url: str, job_dir: Path, job_id: str, on
             _write_resource(client, segment, output, on_update, state)
             on_update(stage=f"NOVA Native · HLS segment {index}/{len(segments)}")
     return target
+
+
+def _choose_hls_variant(variants: list[dict], quality: str) -> dict:
+    if not variants:
+        raise NativeEngineError("The HLS master playlist contains no selectable video variants.")
+    variants.sort(key=lambda item: (item["height"], item["bandwidth"]), reverse=True)
+    if quality == "best":
+        return variants[0]
+    cap = int(quality)
+    eligible = [item for item in variants if item["height"] and item["height"] <= cap]
+    if eligible:
+        return max(eligible, key=lambda item: (item["height"], item["bandwidth"]))
+    known = [item for item in variants if item["height"]]
+    if known:
+        return min(known, key=lambda item: (item["height"], -item["bandwidth"]))
+    return variants[-1]
+
+
+def _mux_hls_tracks(video_track: Path, audio_track: Path, job_id: str) -> Path:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise NativeEngineError("This HLS variant has separate audio/video tracks. Install the local FFmpeg binary to mux them.")
+    output = video_track.parent / f"nova-native-{job_id}.mp4"
+    result = subprocess.run(
+        [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(video_track), "-i", str(audio_track),
+         "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+         "-movflags", "+faststart", str(output)],
+        capture_output=True, text=True, timeout=900, check=False
+    )
+    if result.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+        raise NativeEngineError(f"FFmpeg could not mux the HLS tracks: {(result.stderr or 'unknown error')[-300:]}")
+    return output
+
+
+def _download_hls(
+    client: httpx.Client,
+    url: str,
+    job_dir: Path,
+    job_id: str,
+    on_update,
+    quality: str = "best",
+) -> Path:
+    text, final_url = _read_manifest(client, url)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or lines[0] != "#EXTM3U":
+        raise NativeEngineError("The HLS playlist is malformed.")
+
+    variants = []
+    audio_renditions = []
+    for index, line in enumerate(lines):
+        if line.startswith("#EXT-X-MEDIA:"):
+            attrs = _parse_hls_attrs(line.split(":", 1)[1])
+            if attrs.get("TYPE") == "AUDIO":
+                audio_renditions.append(attrs)
+        elif line.startswith("#EXT-X-STREAM-INF:"):
+            attrs = _parse_hls_attrs(line.split(":", 1)[1])
+            next_uri = next((item for item in lines[index + 1:] if not item.startswith("#")), None)
+            if not next_uri:
+                raise NativeEngineError("HLS master playlist has a variant without a URI.")
+            resolution = attrs.get("RESOLUTION", "")
+            height = 0
+            match = re.fullmatch(r"\d+x(\d+)", resolution)
+            if match:
+                height = int(match.group(1))
+            variants.append({
+                "bandwidth": int(attrs.get("AVERAGE-BANDWIDTH") or attrs.get("BANDWIDTH") or 0),
+                "height": height,
+                "url": urljoin(final_url, next_uri),
+                "audio_group": attrs.get("AUDIO"),
+            })
+
+    if variants:
+        selected = _choose_hls_variant(variants, quality)
+        video_path = job_dir / f"nova-native-{job_id}-video.ts"
+        state = {"total": 0}
+        _download_hls_media_playlist(client, selected["url"], video_path, on_update, state)
+
+        group = selected.get("audio_group")
+        rendition_candidates = [
+            item for item in audio_renditions
+            if group and item.get("GROUP-ID") == group and item.get("URI")
+        ]
+        if rendition_candidates:
+            rendition = next((item for item in rendition_candidates if item.get("DEFAULT") == "YES"), None)
+            if rendition is None:
+                rendition = next((item for item in rendition_candidates if item.get("AUTOSELECT") == "YES"), None)
+            if rendition is None:
+                rendition = rendition_candidates[0]
+            audio_url = urljoin(final_url, rendition["URI"])
+            audio_path = job_dir / f"nova-native-{job_id}-audio.ts"
+            _download_hls_media_playlist(client, audio_url, audio_path, on_update, state)
+            return _mux_hls_tracks(video_path, audio_path, job_id)
+        return video_path
+
+    # A media playlist (rather than a master playlist).
+    extension = ".mp4" if any(line.startswith("#EXT-X-MAP:") for line in lines) else ".ts"
+    target = job_dir / f"nova-native-{job_id}{extension}"
+    return _download_hls_media_playlist(client, url, target, on_update, {"total": 0})
 
 
 def _local_name(tag: str) -> str:
