@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
@@ -22,6 +23,7 @@ MAX_BYTES = int(float(os.getenv("MAX_DOWNLOAD_GB", "8")) * 1024**3)
 MAX_MANIFEST_BYTES = 3 * 1024 * 1024
 MAX_SEGMENTS = 20_000
 MAX_REDIRECTS = 5
+MAX_REQUEST_RETRIES = 2
 HEADERS = {"User-Agent": "NOVA-FETCH/1.0 (self-hosted media client)", "Accept": "*/*"}
 
 
@@ -57,20 +59,58 @@ def _extension(url: str, content_type: str | None = None, filename: str | None =
     return mimetypes.guess_extension(mime) or ".bin"
 
 
-def _request_following_redirects(client: httpx.Client, url: str, stream: bool):
+def _request_following_redirects(
+    client: httpx.Client,
+    url: str,
+    stream: bool,
+    extra_headers: dict[str, str] | None = None,
+):
+    """GET a validated URL, retry transient failures, and validate every redirect."""
     current = validate_external_url(url)
+    request_headers = {**HEADERS, **(extra_headers or {})}
+    retryable_statuses = {408, 425, 429, 500, 502, 503, 504}
+
     for _ in range(MAX_REDIRECTS + 1):
-        request = client.build_request("GET", current, headers=HEADERS)
-        response = client.send(request, stream=stream, follow_redirects=False)
+        response = None
+        for attempt in range(MAX_REQUEST_RETRIES + 1):
+            try:
+                request = client.build_request("GET", current, headers=request_headers)
+                response = client.send(request, stream=stream, follow_redirects=False)
+            except (httpx.TimeoutException, httpx.TransportError):
+                if attempt >= MAX_REQUEST_RETRIES:
+                    raise
+                time.sleep(min(0.25 * (2 ** attempt), 2.0))
+                continue
+
+            if response.status_code in retryable_statuses and attempt < MAX_REQUEST_RETRIES:
+                retry_after = response.headers.get("retry-after", "")
+                response.close()
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = 0.25 * (2 ** attempt)
+                time.sleep(max(0.0, min(delay, 3.0)))
+                continue
+            break
+
+        if response is None:
+            raise NativeEngineError("The source request failed without a response.")
+        if response.status_code in retryable_statuses:
+            response.close()
+            response.raise_for_status()
+
         if response.status_code not in {301, 302, 303, 307, 308}:
             response.raise_for_status()
             return response, current
+
         location = response.headers.get("location")
         response.close()
         if not location:
             raise NativeEngineError("The source returned an invalid redirect.")
         current = validate_external_url(urljoin(current, location))
+
     raise NativeEngineError("The source redirected too many times.")
+
 
 
 def preview(url: str) -> dict:
@@ -288,22 +328,60 @@ def _read_manifest(client: httpx.Client, url: str) -> tuple[str, str]:
         response.close()
 
 
-def _write_resource(client: httpx.Client, url: str, output, on_update, state: dict, total_hint: int = 0):
-    response, _ = _request_following_redirects(client, url, stream=True)
+def _write_resource(
+    client: httpx.Client,
+    url: str,
+    output,
+    on_update,
+    state: dict,
+    total_hint: int = 0,
+    byte_range: tuple[int, int] | None = None,
+):
+    """Stream a media resource, optionally requiring one exact HTTP byte range."""
+    extra_headers = None
+    expected_length = None
+    if byte_range is not None:
+        offset, length = byte_range
+        if offset < 0 or length <= 0:
+            raise NativeEngineError("The requested media byte range is invalid.")
+        end = offset + length - 1
+        extra_headers = {"Range": f"bytes={offset}-{end}"}
+        expected_length = length
+
+    response, _ = _request_following_redirects(
+        client, url, stream=True, extra_headers=extra_headers
+    )
     try:
+        if expected_length is not None:
+            if response.status_code != 206:
+                raise NativeEngineError(
+                    "The source ignored the HLS byte-range request; refusing to save the full resource as a segment."
+                )
+            content_range = response.headers.get("content-range", "")
+            match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", content_range.strip(), re.I)
+            if not match or int(match.group(1)) != offset or int(match.group(2)) != end:
+                raise NativeEngineError("The source returned a mismatched Content-Range for an HLS segment.")
+
+        written = 0
         for chunk in response.iter_bytes(256 * 1024):
             if not chunk:
                 continue
+            written += len(chunk)
             state["total"] += len(chunk)
             if state["total"] > MAX_BYTES:
                 raise NativeEngineError("The download exceeds MAX_DOWNLOAD_GB.")
+            if expected_length is not None and written > expected_length:
+                raise NativeEngineError("The source returned more bytes than the requested HLS range.")
             output.write(chunk)
-            total = total_hint or int(response.headers.get("content-length") or 0)
+            total = total_hint or expected_length or int(response.headers.get("content-length") or 0)
             percent = round(min(99.5, state["total"] * 100 / total), 1) if total else 0
             on_update(percent=percent, downloaded_bytes=state["total"], total_bytes=total,
                       stage="Downloading with NOVA Native")
+        if expected_length is not None and written != expected_length:
+            raise NativeEngineError("The source returned an incomplete HLS byte range.")
     finally:
         response.close()
+
 
 
 def _parse_hls_attrs(value: str) -> dict[str, str]:
@@ -311,6 +389,34 @@ def _parse_hls_attrs(value: str) -> dict[str, str]:
     for match in re.finditer(r'([A-Z0-9-]+)=("(?:[^"]*)"|[^,]*)', value):
         attrs[match.group(1)] = match.group(2).strip('"')
     return attrs
+
+
+def _parse_hls_byterange(value: str) -> tuple[int, int | None]:
+    """Parse HLS length[@offset] byte-range notation."""
+    match = re.fullmatch(r"\s*(\d+)(?:@(\d+))?\s*", value or "")
+    if not match:
+        raise NativeEngineError("The HLS playlist contains a malformed BYTERANGE.")
+    length = int(match.group(1))
+    offset = int(match.group(2)) if match.group(2) is not None else None
+    if length <= 0 or length > MAX_BYTES:
+        raise NativeEngineError("The HLS byte range has an invalid or excessive length.")
+    return length, offset
+
+
+def _resolve_hls_byterange(
+    raw_range: str,
+    resource_url: str,
+    previous_ends: dict[str, int],
+) -> tuple[int, int]:
+    length, offset = _parse_hls_byterange(raw_range)
+    if offset is None:
+        offset = previous_ends.get(resource_url)
+        if offset is None:
+            raise NativeEngineError(
+                "An HLS byte range omitted its offset without a previous range for the same resource."
+            )
+    previous_ends[resource_url] = offset + length
+    return offset, length
 
 
 def _download_hls_media_playlist(
@@ -326,11 +432,9 @@ def _download_hls_media_playlist(
     if not lines or lines[0] != "#EXTM3U":
         raise NativeEngineError("The HLS media playlist is malformed.")
     if any(line.startswith("#EXT-X-STREAM-INF:") for line in lines):
-        raise NativeEngineError("Nested HLS master playlists are not supported yet.")
+        raise NativeEngineError("Nested HLS master playlists are not supported.")
     if "#EXT-X-ENDLIST" not in lines:
-        raise NativeEngineError("Live or unfinished HLS playlists are not supported by NOVA Native yet.")
-    if any(line.startswith("#EXT-X-BYTERANGE") for line in lines):
-        raise NativeEngineError("This HLS playlist uses byte ranges, which NOVA Native does not support yet.")
+        raise NativeEngineError("Live or unfinished HLS playlists are not supported by NOVA Native.")
 
     for line in lines:
         if line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:")):
@@ -338,27 +442,52 @@ def _download_hls_media_playlist(
             if method != "NONE":
                 raise NativeEngineError("Encrypted or DRM-protected HLS is not supported.")
 
-    init_uri = None
-    segments = []
-    for line in lines:
-        if line.startswith("#EXT-X-MAP:"):
-            attrs = _parse_hls_attrs(line.split(":", 1)[1])
-            if not attrs.get("URI"):
-                raise NativeEngineError("HLS initialization segment is malformed.")
-            init_uri = urljoin(final_url, attrs["URI"])
-        elif not line.startswith("#"):
-            segments.append(urljoin(final_url, line))
+    previous_ends: dict[str, int] = {}
+    init_resource: tuple[str, tuple[int, int] | None] | None = None
+    segments: list[tuple[str, tuple[int, int] | None]] = []
+    pending_range: str | None = None
 
+    for line in lines:
+        if line.startswith("#EXT-X-BYTERANGE:"):
+            pending_range = line.split(":", 1)[1].strip()
+        elif line.startswith("#EXT-X-MAP:"):
+            attrs = _parse_hls_attrs(line.split(":", 1)[1])
+            raw_uri = attrs.get("URI")
+            if not raw_uri:
+                raise NativeEngineError("HLS initialization segment is malformed.")
+            init_url = urljoin(final_url, raw_uri)
+            init_range = (
+                _resolve_hls_byterange(attrs["BYTERANGE"], init_url, previous_ends)
+                if attrs.get("BYTERANGE") else None
+            )
+            init_resource = (init_url, init_range)
+        elif not line.startswith("#"):
+            segment_url = urljoin(final_url, line)
+            segment_range = (
+                _resolve_hls_byterange(pending_range, segment_url, previous_ends)
+                if pending_range is not None else None
+            )
+            segments.append((segment_url, segment_range))
+            pending_range = None
+
+    if pending_range is not None:
+        raise NativeEngineError("The HLS playlist ends with a BYTERANGE that has no media segment.")
     if not segments or len(segments) > MAX_SEGMENTS:
         raise NativeEngineError("The HLS playlist is empty or exceeds the segment limit.")
 
     with target.open("wb") as output:
-        if init_uri:
-            _write_resource(client, init_uri, output, on_update, state)
-        for index, segment in enumerate(segments, start=1):
-            _write_resource(client, segment, output, on_update, state)
+        if init_resource:
+            init_url, init_range = init_resource
+            _write_resource(
+                client, init_url, output, on_update, state, byte_range=init_range
+            )
+        for index, (segment_url, segment_range) in enumerate(segments, start=1):
+            _write_resource(
+                client, segment_url, output, on_update, state, byte_range=segment_range
+            )
             on_update(stage=f"NOVA Native · HLS segment {index}/{len(segments)}")
     return target
+
 
 
 def _choose_hls_variant(variants: list[dict], quality: str) -> dict:
@@ -649,6 +778,153 @@ def _write_dash_template(
     return target
 
 
+def _dash_adaptation_kind(adaptation) -> str:
+    """Identify audio/video/text adaptations using public MPD metadata."""
+    representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
+    nodes = [adaptation, *representations]
+    values = []
+    for node in nodes:
+        values.extend([
+            str(node.attrib.get("contentType", "")),
+            str(node.attrib.get("mimeType", "")),
+            str(node.attrib.get("codecs", "")),
+        ])
+    description = " ".join(values).lower()
+    if any(token in description for token in ("text/", "subtitle", "ttml", "stpp", "wvtt")):
+        return "text"
+    if "audio/" in description or any(codec in description for codec in (
+        "mp4a", "aac", "opus", "vorbis", "ac-3", "ec-3", "flac"
+    )):
+        return "audio"
+    if "video/" in description or any(codec in description for codec in (
+        "avc1", "avc3", "hev1", "hvc1", "vp09", "vp9", "av01"
+    )):
+        return "video"
+    for node in nodes:
+        if int(node.attrib.get("height", "0") or 0) > 0:
+            return "video"
+        if node.attrib.get("audioSamplingRate") or _child(node, "AudioChannelConfiguration") is not None:
+            return "audio"
+    return "unknown"
+
+
+def _dash_adaptation_score(adaptation, track_kind: str) -> tuple[int, int]:
+    representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
+    if not representations:
+        representations = [adaptation]
+    if track_kind == "video":
+        return (
+            max((int(node.attrib.get("height", "0") or 0) for node in representations), default=0),
+            max((int(node.attrib.get("bandwidth", "0") or 0) for node in representations), default=0),
+        )
+    return (
+        0,
+        max((int(node.attrib.get("bandwidth", "0") or 0) for node in representations), default=0),
+    )
+
+
+def _download_dash_adaptation(
+    client: httpx.Client,
+    final_url: str,
+    root,
+    period,
+    adaptation,
+    job_dir: Path,
+    target: Path,
+    quality: str,
+    on_update,
+) -> Path:
+    representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
+    representation = _choose_dash_representation(representations, quality) if representations else adaptation
+    if representation is None:
+        raise NativeEngineError("The DASH adaptation has no usable representation.")
+
+    # BaseURL is hierarchical: each child URL is relative to its parent's URL.
+    base_url = final_url
+    for element in (root, period, adaptation, representation):
+        base = _child(element, "BaseURL")
+        if base is not None and base.text and base.text.strip():
+            base_url = urljoin(base_url, base.text.strip())
+
+    period_duration = _parse_iso_duration(period.attrib.get("duration"))
+    if not period_duration:
+        total_duration = _parse_iso_duration(root.attrib.get("mediaPresentationDuration"))
+        period_start = _parse_iso_duration(period.attrib.get("start")) if period.attrib.get("start") else 0
+        period_duration = max(0.0, total_duration - period_start)
+
+    template, timeline = _dash_inherited_template(root, period, adaptation, representation)
+    if template:
+        target = target.with_suffix(".webm" if "webm" in (
+            str(representation.attrib.get("mimeType") or adaptation.attrib.get("mimeType") or "")
+        ).lower() else ".mp4")
+        return _write_dash_template(
+            client, base_url, template, timeline, period_duration,
+            representation, adaptation, target, on_update
+        )
+
+    segment_list = _first_not_none(
+        _child(representation, "SegmentList"),
+        _child(adaptation, "SegmentList"),
+        _child(period, "SegmentList"),
+        _child(root, "SegmentList"),
+    )
+    if segment_list is None:
+        if base_url == final_url:
+            raise NativeEngineError(
+                "This DASH adaptation uses SegmentBase or has no resolvable BaseURL."
+            )
+        extension = Path(urlsplit(base_url).path).suffix or target.suffix or ".mp4"
+        target = target.with_suffix(extension)
+        state = {"total": 0}
+        with target.open("wb") as output:
+            _write_resource(client, base_url, output, on_update, state)
+        return target
+
+    resources = []
+    initialization = _child(segment_list, "Initialization")
+    if initialization is not None:
+        if initialization.attrib.get("range"):
+            raise NativeEngineError("DASH Initialization byte ranges are not supported by NOVA Native yet.")
+        if initialization.attrib.get("sourceURL"):
+            resources.append(urljoin(base_url, initialization.attrib["sourceURL"]))
+    for item in segment_list:
+        if _local_name(item.tag) == "SegmentURL":
+            if item.attrib.get("mediaRange"):
+                raise NativeEngineError("DASH SegmentURL mediaRange is not supported by NOVA Native yet.")
+            if item.attrib.get("media"):
+                resources.append(urljoin(base_url, item.attrib["media"]))
+    if not resources or len(resources) > MAX_SEGMENTS:
+        raise NativeEngineError("DASH SegmentList is empty or exceeds the segment limit.")
+
+    state = {"total": 0}
+    with target.open("wb") as output:
+        for index, resource in enumerate(resources, start=1):
+            _write_resource(client, resource, output, on_update, state)
+            on_update(stage=f"NOVA Native · DASH segment {index}/{len(resources)}")
+    return target
+
+
+def _mux_dash_tracks(video_track: Path, audio_track: Path, job_id: str) -> Path:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise NativeEngineError(
+            "This DASH source uses separate audio and video tracks. Install the local FFmpeg binary to mux them."
+        )
+    output = video_track.parent / f"nova-native-{job_id}.mp4"
+    result = subprocess.run(
+        [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(video_track), "-i", str(audio_track),
+         "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+         "-movflags", "+faststart", str(output)],
+        capture_output=True, text=True, timeout=900, check=False
+    )
+    if result.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+        raise NativeEngineError(
+            f"FFmpeg could not mux the DASH tracks: {(result.stderr or 'unknown error')[-300:]}"
+        )
+    return output
+
+
 def _download_dash(
     client: httpx.Client,
     url: str,
@@ -666,7 +942,7 @@ def _download_dash(
         raise NativeEngineError("The DASH manifest is malformed.") from exc
 
     if root.attrib.get("type", "static").lower() == "dynamic":
-        raise NativeEngineError("Live/dynamic DASH is not supported by NOVA Native yet.")
+        raise NativeEngineError("Live/dynamic DASH is not supported by NOVA Native.")
     if any(_local_name(node.tag) == "ContentProtection" for node in root.iter()):
         raise NativeEngineError("Encrypted or DRM-protected DASH is not supported.")
 
@@ -675,66 +951,59 @@ def _download_dash(
         raise NativeEngineError("NOVA Native currently supports one static DASH Period per manifest.")
     period = periods[0]
     adaptations = [node for node in period if _local_name(node.tag) == "AdaptationSet"]
-    if len(adaptations) != 1:
-        raise NativeEngineError("This DASH source has separate or multiple audio/video adaptations. Multi-track DASH muxing is a later NOVA milestone.")
-    adaptation = adaptations[0]
+    if not adaptations:
+        raise NativeEngineError("The DASH Period has no AdaptationSet.")
 
-    representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
-    representation = _choose_dash_representation(representations, quality) if representations else adaptation
-    if representation is None:
-        raise NativeEngineError("The DASH manifest has no usable representation.")
+    typed = {kind: [] for kind in ("video", "audio", "text", "unknown")}
+    for adaptation in adaptations:
+        typed[_dash_adaptation_kind(adaptation)].append(adaptation)
 
-    base = _first_not_none(
-        _child(representation, "BaseURL"), _child(adaptation, "BaseURL"),
-        _child(period, "BaseURL"), _child(root, "BaseURL")
-    )
-    base_url = urljoin(final_url, (base.text or "").strip()) if base is not None and base.text else final_url
-    period_duration = _parse_iso_duration(period.attrib.get("duration"))
-    if not period_duration:
-        total_duration = _parse_iso_duration(root.attrib.get("mediaPresentationDuration"))
-        period_start = _parse_iso_duration(period.attrib.get("start")) if period.attrib.get("start") else 0
-        period_duration = max(0.0, total_duration - period_start)
+    # When audio and video are published as separate adaptations, fetch the
+    # highest compatible video representation and the best available audio
+    # representation independently, then mux the tracks locally with FFmpeg.
+    if typed["video"] and typed["audio"]:
+        video_adaptation = max(
+            typed["video"], key=lambda node: _dash_adaptation_score(node, "video")
+        )
+        audio_adaptation = max(
+            typed["audio"], key=lambda node: _dash_adaptation_score(node, "audio")
+        )
+        video_path = _download_dash_adaptation(
+            client, final_url, root, period, video_adaptation, job_dir,
+            job_dir / f"nova-native-{job_id}-video.mp4", quality, on_update
+        )
+        audio_path = _download_dash_adaptation(
+            client, final_url, root, period, audio_adaptation, job_dir,
+            job_dir / f"nova-native-{job_id}-audio.mp4", "best", on_update
+        )
+        on_update(stage="NOVA Native · Muxing DASH audio and video")
+        return _mux_dash_tracks(video_path, audio_path, job_id)
 
-    # SegmentTemplate attributes inherit from MPD -> Period -> AdaptationSet
-    # -> Representation, with the most specific declaration winning.
-    template, timeline = _dash_inherited_template(root, period, adaptation, representation)
-    if template:
-        mime = str(representation.attrib.get("mimeType") or adaptation.attrib.get("mimeType") or "")
-        extension = ".webm" if "webm" in mime else ".mp4"
-        target = job_dir / f"nova-native-{job_id}{extension}"
-        return _write_dash_template(
-            client, base_url, template, timeline, period_duration,
-            representation, adaptation, target, on_update
+    if len(adaptations) == 1:
+        return _download_dash_adaptation(
+            client, final_url, root, period, adaptations[0], job_dir,
+            job_dir / f"nova-native-{job_id}.mp4", quality, on_update
         )
 
-    segment_list = _first_not_none(_child(representation, "SegmentList"), _child(adaptation, "SegmentList"))
-    if segment_list is None:
-        if base_url == final_url:
-            raise NativeEngineError("This DASH manifest uses an unsupported SegmentBase or has no resolvable BaseURL.")
-        extension = Path(urlsplit(base_url).path).suffix or ".mp4"
-        target = job_dir / f"nova-native-{job_id}{extension}"
-        state = {"total": 0}
-        with target.open("wb") as output:
-            _write_resource(client, base_url, output, on_update, state)
-        return target
+    candidates = typed["video"] or typed["audio"]
+    if candidates:
+        selected = max(
+            candidates,
+            key=lambda node: _dash_adaptation_score(
+                node, "video" if typed["video"] else "audio"
+            )
+        )
+        return _download_dash_adaptation(
+            client, final_url, root, period, selected, job_dir,
+            job_dir / f"nova-native-{job_id}.mp4", quality, on_update
+        )
 
-    resources = []
-    initialization = _child(segment_list, "Initialization")
-    if initialization is not None and initialization.attrib.get("sourceURL"):
-        resources.append(urljoin(base_url, initialization.attrib["sourceURL"]))
-    for item in segment_list:
-        if _local_name(item.tag) == "SegmentURL" and item.attrib.get("media"):
-            resources.append(urljoin(base_url, item.attrib["media"]))
-    if not resources or len(resources) > MAX_SEGMENTS:
-        raise NativeEngineError("DASH SegmentList is empty or exceeds the segment limit.")
+    raise NativeEngineError(
+        "NOVA Native could not identify a supported DASH audio or video adaptation. "
+        "Text/subtitle-only and ambiguous adaptations are not downloaded as media."
+    )
 
-    target = job_dir / f"nova-native-{job_id}.mp4"
-    state = {"total": 0}
-    with target.open("wb") as output:
-        for index, resource in enumerate(resources, start=1):
-            _write_resource(client, resource, output, on_update, state)
-            on_update(stage=f"NOVA Native · DASH segment {index}/{len(resources)}")
-    return target
+
 
 
 
