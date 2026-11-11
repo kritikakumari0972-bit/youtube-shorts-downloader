@@ -67,6 +67,17 @@ def _format_duration(seconds: int) -> str:
 def extract_metadata(url: str) -> dict[str, Any]:
     if native_engine.is_native_url(url):
         return native_engine.preview(url)
+    resolved = native_engine.resolve_html5_media(url)
+    if resolved:
+        metadata = native_engine.preview(resolved["media_url"])
+        metadata.update({
+            "title": resolved.get("title") or metadata["title"],
+            "creator": resolved.get("creator") or metadata["creator"],
+            "thumbnail": resolved.get("thumbnail"),
+            "source": resolved.get("source") or metadata["source"],
+            "webpage_url": url,
+        })
+        return metadata
     if yt_dlp is None:
         raise RuntimeError(
             "This is a website page, not a direct media URL. Install the local site-extractor compatibility pack (yt-dlp) or use a direct HTTP/HLS/DASH media URL."
@@ -250,16 +261,37 @@ def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Pat
     is_native = native_engine.is_native_url(job["url"])
 
     if provider == "native":
+        native_job = job
         if not is_native:
-            raise RuntimeError("The NOVA Native engine accepts direct media files and standard HLS/DASH manifest URLs. Choose Automatic for supported website pages.")
-        return native_engine.download(job, on_update)
+            resolved = native_engine.resolve_html5_media(job["url"])
+            if not resolved:
+                raise RuntimeError("NOVA Native could not find a directly exposed HTML5 media source on this page.")
+            native_job = {**job, "url": resolved["media_url"]}
+        return native_engine.download(native_job, on_update)
 
     if provider == "yt-dlp":
-        return _download_with_ytdlp(job, on_update)
+        if not is_native and not job.get("subtitles"):
+        resolved = native_engine.resolve_html5_media(job["url"])
+        if resolved:
+            try:
+                on_update(stage="NOVA Native · public HTML5 source found")
+                return native_engine.download({**job, "url": resolved["media_url"]}, on_update)
+            except DownloadCancelled:
+                raise
+            except Exception as native_error:
+                on_update(stage="Trying local site-extractor compatibility pack")
+                try:
+                    return _download_with_ytdlp(job, on_update)
+                except Exception as extractor_error:
+                    raise RuntimeError(
+                        f"NOVA HTML5: {str(native_error)[:220]} | Local extractor: {str(extractor_error)[:220]}"
+                    ) from extractor_error
+
+    return _download_with_ytdlp(job, on_update)
 
     # Automatic mode uses NOVA's own standards-based engine first.
     # Website-page extractors are a local compatibility layer, not a hosted API.
-    if is_native:
+    if is_native and not job.get("subtitles"):
         try:
             return native_engine.download(job, on_update)
         except DownloadCancelled:
