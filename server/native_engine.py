@@ -214,7 +214,12 @@ def resolve_html5_media(url: str) -> dict | None:
     for document in parser.jsonld_documents:
         for item in visit_jsonld(document):
             raw_types = item.get("@type", [])
-            types = {raw_types} if isinstance(raw_types, str) else set(raw_types or [])
+            if isinstance(raw_types, str):
+                raw_types = [raw_types]
+            types = {
+                str(value).rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+                for value in (raw_types or [])
+            }
             if not types.intersection({"VideoObject", "AudioObject", "MediaObject"}):
                 continue
             candidate = item.get("contentUrl")
