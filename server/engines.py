@@ -11,6 +11,7 @@ except ImportError:  # Keep the native engine importable without the compatibili
     yt_dlp = None  # type: ignore[assignment]
 
 from . import native_engine, store
+from .extractors import get_registry
 from .security import safe_filename
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).expanduser().resolve()
@@ -27,8 +28,10 @@ def tool_status() -> dict[str, Any]:
         version = yt_dlp.version.__version__ if yt_dlp is not None else "not installed"
     except Exception:
         version = "installed" if yt_dlp is not None else "not installed"
+    registry = get_registry()
     return {
-        "native_engine": "NOVA Native v1",
+        "native_engine": "NOVA Native v1.1",
+        "extractors": registry.names(),
         "yt_dlp": version,
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
@@ -65,22 +68,23 @@ def _format_duration(seconds: int) -> str:
 
 
 def extract_metadata(url: str) -> dict[str, Any]:
-    if native_engine.is_native_url(url):
-        return native_engine.preview(url)
-    resolved = native_engine.resolve_html5_media(url)
-    if resolved:
-        metadata = native_engine.preview(resolved["media_url"])
+    match = get_registry().extract(url)
+    if match:
+        resolved = match.result
+        metadata = resolved.get("metadata") or native_engine.preview(resolved["media_url"])
         metadata.update({
-            "title": resolved.get("title") or metadata["title"],
-            "creator": resolved.get("creator") or metadata["creator"],
-            "thumbnail": resolved.get("thumbnail"),
-            "source": resolved.get("source") or metadata["source"],
+            "title": resolved.get("title") or metadata.get("title"),
+            "creator": resolved.get("creator") or metadata.get("creator"),
+            "thumbnail": resolved.get("thumbnail") or metadata.get("thumbnail"),
+            "source": resolved.get("source") or f"NOVA Extractor · {match.extractor}",
             "webpage_url": url,
         })
         return metadata
+
     if yt_dlp is None:
         raise RuntimeError(
-            "This is a website page, not a direct media URL. Install the local site-extractor compatibility pack (yt-dlp) or use a direct HTTP/HLS/DASH media URL."
+            "NOVA Extractor Core found no directly exposed media source on this page. "
+            "Install the local site-extractor compatibility pack (yt-dlp) for additional site-specific extractors."
         )
 
     options: dict[str, Any] = {
@@ -258,47 +262,39 @@ def _download_with_ytdlp(job: dict[str, Any], on_update: Callable[..., None]) ->
 
 def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
     provider = job.get("provider", "auto")
-    source_url = job["url"]
-    direct_media = native_engine.is_native_url(source_url)
 
     if provider == "yt-dlp":
         return _download_with_ytdlp(job, on_update)
 
+    if job.get("subtitles"):
+        if provider == "native":
+            raise RuntimeError("NOVA Native does not extract subtitles yet. Choose Automatic or the local site-extractor pack.")
+        return _download_with_ytdlp(job, on_update)
+
+    match = get_registry().extract(job["url"])
     if provider == "native":
-        if not direct_media:
-            resolved = native_engine.resolve_html5_media(source_url)
-            if not resolved:
-                raise RuntimeError(
-                    "NOVA Native could not find a directly exposed HTML5 media source on this public page."
-                )
-            job = {**job, "url": resolved["media_url"]}
-        return native_engine.download(job, on_update)
+        if not match:
+            raise RuntimeError(
+                "NOVA Extractor Core could not find a directly exposed media source. "
+                "This page needs a dedicated first-party adapter or the local compatibility pack."
+            )
+        resolved_job = {**job, "url": match.result["media_url"]}
+        on_update(stage=f"NOVA Native · {match.extractor}")
+        return native_engine.download(resolved_job, on_update)
 
-    # Automatic mode prefers first-party native handlers, then the local
-    # compatibility extractor for sources requiring site-specific logic.
-    if not direct_media and not job.get("subtitles"):
-        resolved = native_engine.resolve_html5_media(source_url)
-        if resolved:
-            try:
-                on_update(stage="NOVA Native · public HTML5 source found")
-                return native_engine.download({**job, "url": resolved["media_url"]}, on_update)
-            except DownloadCancelled:
-                raise
-            except Exception as native_error:
-                on_update(stage="Trying local site-extractor compatibility pack")
-                try:
-                    return _download_with_ytdlp(job, on_update)
-                except Exception as extractor_error:
-                    raise RuntimeError(
-                        f"NOVA HTML5: {str(native_error)[:220]} | Local extractor: {str(extractor_error)[:220]}"
-                    ) from extractor_error
-
-    if direct_media and not job.get("subtitles"):
+    # Automatic mode runs NOVA's own extractor adapters and media engine first.
+    # It falls back to the local compatibility pack only when the source needs
+    # site-specific extraction or a native format is not yet implemented.
+    if match:
+        resolved_job = {**job, "url": match.result["media_url"]}
         try:
-            return native_engine.download(job, on_update)
+            on_update(stage=f"NOVA Native · {match.extractor}")
+            return native_engine.download(resolved_job, on_update)
         except DownloadCancelled:
             raise
         except Exception as native_error:
+            if yt_dlp is None:
+                raise RuntimeError(str(native_error)[:500]) from native_error
             on_update(stage="Trying local site-extractor compatibility pack")
             try:
                 return _download_with_ytdlp(job, on_update)
@@ -307,4 +303,6 @@ def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Pat
                     f"NOVA Native: {str(native_error)[:220]} | Local extractor: {str(extractor_error)[:220]}"
                 ) from extractor_error
 
+    if yt_dlp is None:
+        raise RuntimeError("No NOVA extractor matched this source and the local compatibility pack is not installed.")
     return _download_with_ytdlp(job, on_update)
