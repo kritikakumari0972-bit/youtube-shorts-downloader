@@ -782,31 +782,29 @@ def _dash_adaptation_kind(adaptation) -> str:
     """Identify audio/video/text adaptations using public MPD metadata."""
     representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
     nodes = [adaptation, *representations]
-    values = []
-    for node in nodes:
-        values.extend([
-            str(node.attrib.get("contentType", "")),
-            str(node.attrib.get("mimeType", "")),
-            str(node.attrib.get("codecs", "")),
-        ])
-    description = " ".join(values).lower()
+    content_types = [str(node.attrib.get("contentType", "")).lower() for node in nodes]
+    mime_types = [str(node.attrib.get("mimeType", "")).lower() for node in nodes]
+    codecs = " ".join(str(node.attrib.get("codecs", "")) for node in nodes).lower()
+    description = " ".join(content_types + mime_types + [codecs])
+
     if any(token in description for token in ("text/", "subtitle", "ttml", "stpp", "wvtt")):
         return "text"
-    if "audio/" in description or any(codec in description for codec in (
-        "mp4a", "aac", "opus", "vorbis", "ac-3", "ec-3", "flac"
-    )):
-        return "audio"
-    if "video/" in description or any(codec in description for codec in (
-        "avc1", "avc3", "hev1", "hvc1", "vp09", "vp9", "av01"
-    )):
+    # Prefer the explicit media type over codec substrings: some multiplexed
+    # codec declarations can mention both an audio and a video codec.
+    if any(value == "video" or value.startswith("video/") for value in content_types + mime_types):
         return "video"
+    if any(value == "audio" or value.startswith("audio/") for value in content_types + mime_types):
+        return "audio"
+    if any(codec in codecs for codec in ("avc1", "avc3", "hev1", "hvc1", "vp09", "vp9", "av01")):
+        return "video"
+    if any(codec in codecs for codec in ("mp4a", "aac", "opus", "vorbis", "ac-3", "ec-3", "flac")):
+        return "audio"
     for node in nodes:
         if int(node.attrib.get("height", "0") or 0) > 0:
             return "video"
         if node.attrib.get("audioSamplingRate") or _child(node, "AudioChannelConfiguration") is not None:
             return "audio"
     return "unknown"
-
 
 def _dash_adaptation_score(adaptation, track_kind: str) -> tuple[int, int]:
     representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
