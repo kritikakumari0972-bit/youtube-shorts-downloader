@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#080d16">
+  <meta name="description" content="NOVA FETCH — self-hosted media toolkit powered by yt-dlp, FFmpeg and your Cobalt instance.">
+  <title>NOVA FETCH — Media Toolkit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="glow g1"></div><div class="glow g2"></div>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="/"><span class="logo"><i></i><i></i><i></i><i></i></span><span><b>NOVA<span>FETCH</span></b><small>UNIVERSAL MEDIA TOOLKIT</small></span></a>
+      <div class="head-right"><span class="local"><i></i> SELF-HOSTED ENGINE</span><button id="settings-open" class="icon-btn" aria-label="Settings">⚙</button></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div><div class="eyebrow">ONE WORKSPACE · MULTIPLE ENGINES</div>
+          <h1>Bring media<br><em>into your orbit.</em></h1>
+          <p>A powerful media workspace for links you own or have permission to save. Inspect a source, choose your format, and send it to the download queue.</p>
+          <div class="chips"><span>YT-DLP</span><span>FFMPEG</span><span>COBALT CONNECTOR</span><span>SUBTITLES</span></div>
+        </div>
+        <div class="orb" aria-hidden="true"><div class="orb-ring r1"></div><div class="orb-ring r2"></div><div class="orb-core">NF</div><b class="orbit-tag t1">YT-DLP</b><b class="orbit-tag t2">FFMPEG</b><b class="orbit-tag t3">COBALT</b></div>
+      </section>
+
+      <section class="panel status-panel"><div class="status-title"><i></i> ENGINE STATUS</div><div id="engine-status" class="engine-status">Connecting to server…</div><span class="muted">Detected from the actual server runtime.</span></section>
+
+      <section class="layout">
+        <section class="panel form-panel">
+          <div class="section-head"><div><small>01 / SOURCE</small><h2>Start a download</h2></div><b>01</b></div>
+          <label class="label" for="source-urls">SOURCE LINKS <span>one per line · up to 10 links</span></label>
+          <div class="url-box"><textarea id="source-urls" rows="3" placeholder="Paste public media URLs here…&#10;https://…"></textarea><button id="paste-button" type="button">PASTE ↗</button></div>
+          <div class="row"><button id="preview-button" class="btn secondary" type="button">⌕ Inspect source</button><span class="hint">Metadata preview · no download yet</span></div>
+          <div id="preview-card" class="preview hidden"><img id="preview-image" alt="Media thumbnail"><div><b id="preview-title">—</b><p id="preview-meta">—</p><small id="preview-formats">—</small></div><span>READY</span></div>
+          <div class="rule"></div>
+          <div class="section-head small-head"><div><small>02 / FORMAT</small><h2>Choose your output</h2></div></div>
+          <div class="controls">
+            <label>MEDIA TYPE<select id="mode"><option value="video">Video</option><option value="audio">Audio only · MP3</option></select></label>
+            <label id="quality-control">VIDEO QUALITY<select id="quality"><option value="best">Best available</option><option value="2160">Up to 4K · 2160p</option><option value="1440">Up to 1440p</option><option value="1080">Up to 1080p</option><option value="720">Up to 720p</option><option value="480">Up to 480p</option><option value="360">Up to 360p</option><option value="240">Up to 240p</option><option value="144">Up to 144p</option></select></label>
+            <label id="container-control">CONTAINER<select id="container"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option></select></label>
+            <label>DOWNLOAD ENGINE<select id="provider"><option value="auto">Automatic · yt-dlp first</option><option value="yt-dlp">yt-dlp only</option><option id="cobalt-option" value="cobalt" disabled>Cobalt · not configured</option></select></label>
+          </div>
+          <div class="toggles">
+            <label><input type="checkbox" id="playlist"><span></span><b>Playlist mode<small>Up to 50 items per job</small></b></label>
+            <label><input type="checkbox" id="subtitles"><span></span><b>Save subtitles<small>Where available</small></b></label>
+            <label><input type="checkbox" id="metadata" checked><span></span><b>Embed metadata<small>Title, creator and tags</small></b></label>
+            <label><input type="checkbox" id="thumbnail"><span></span><b>Embed thumbnail<small>When format supports it</small></b></label>
+          </div>
+          <label class="rights"><input type="checkbox" id="rights-confirm"><span>I own this media or have permission to download and store it.</span></label>
+          <button id="queue-button" class="btn primary" type="button">＋ Add to download queue <b>↗</b></button>
+          <div id="form-message" class="message" role="status"></div>
+        </section>
+
+        <aside class="side">
+          <section class="panel stack-panel"><div class="section-head"><div><small>ENGINE STACK</small><h2>Built to work together</h2></div><b class="spark">✳</b></div>
+            <div class="engine-card"><span class="engine-icon purple">Y</span><div><b>yt-dlp</b><p>Site extractors, playlists, subtitles and quality selection.</p></div><strong>CORE</strong></div>
+            <div class="engine-card"><span class="engine-icon cyan">F</span><div><b>FFmpeg</b><p>Audio conversion, stream merging and media metadata.</p></div><strong>PROCESS</strong></div>
+            <div class="engine-card"><span class="engine-icon lime">C</span><div><b>Cobalt API</b><p>Optional link to your own authorized instance.</p></div><strong>OPTIONAL</strong></div>
+            <div class="stack-foot">＋ Modular provider design — more compatible sources can be added later.</div>
+          </section>
+          <section class="panel safety"><span>◇</span><div><b>Respect the source</b><p>Public access does not automatically grant download rights. No DRM, paywall, private-account or access-control bypass.</p><a href="https://github.com/yt-dlp/yt-dlp#readme" target="_blank" rel="noopener">yt-dlp documentation ↗</a></div></section>
+        </aside>
+      </section>
+
+      <section class="panel queue-panel">
+        <div class="queue-head"><div><small>03 / ACTIVITY</small><h2>Your download queue</h2><p>Live progress, cancellation, completed files and history.</p></div><div class="metrics"><div><b id="metric-active">0</b><small>ACTIVE</small></div><div><b id="metric-done">0</b><small>DONE</small></div><div><b id="metric-failed">0</b><small>FAILED</small></div></div></div>
+        <div id="queue-list" class="queue-list"><div class="empty"><div>↓</div><b>Your queue is clear</b><span>Add a link above to start your first job.</span></div></div>
+        <div class="queue-foot"><span><i></i> LOCAL DOWNLOAD HISTORY</span><span>Files stay on your server until removed</span></div>
+      </section>
+    </main>
+    <footer><b>NOVA FETCH</b><span>POWERED BY OPEN-SOURCE MEDIA TOOLS</span><span>Use responsibly · Respect creators</span></footer>
+  </div>
+
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card"><button id="settings-close" class="close" aria-label="Close">×</button><small>SERVER CONNECTION</small><h2 id="settings-title">Engine settings</h2><p>If this server requires an API key, paste the same secret configured in its <code>APP_API_KEY</code> environment variable. The key is stored only in this browser.</p><label class="label" for="api-key-input">API KEY<input id="api-key-input" type="password" autocomplete="off" placeholder="Your server key"></label><div class="modal-actions"><button id="clear-key" class="btn secondary" type="button">Clear key</button><button id="save-key" class="btn primary" type="button">Save settings</button></div><p class="note">Keep your key private. Never publish it in your repository or share it with others.</p></div>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
