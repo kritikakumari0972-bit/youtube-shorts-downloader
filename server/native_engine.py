@@ -623,6 +623,7 @@ def _download_hls_subtitle_playlist(
         raise NativeEngineError("The HLS subtitle playlist is empty or exceeds the segment limit.")
 
     payloads = []
+    payload_total = 0
     for index, (resource, byte_range) in enumerate(segments, start=1):
         part = target.parent / f".nova-{job_id}-subtitle-{index:05d}.part"
         try:
@@ -632,9 +633,9 @@ def _download_hls_subtitle_playlist(
                     byte_range=byte_range, max_resource_bytes=MAX_SUBTITLE_BYTES
                 )
             part_size = part.stat().st_size
-            current_size = sum(len(item) for item in payloads)
-            if current_size + part_size > MAX_SUBTITLE_BYTES:
+            if payload_total + part_size > MAX_SUBTITLE_BYTES:
                 raise NativeEngineError("The HLS subtitle track exceeds the 64 MiB native subtitle limit.")
+            payload_total += part_size
             payloads.append(part.read_bytes())
         finally:
             part.unlink(missing_ok=True)
