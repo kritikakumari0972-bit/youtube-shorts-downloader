@@ -372,6 +372,8 @@ def _download_dash(client: httpx.Client, url: str, job_dir: Path, job_id: str, o
 
 
 def _extract_mp3(source: Path, job: dict) -> Path:
+    if source.suffix.lower() == ".mp3":
+        return source
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise NativeEngineError("Audio conversion needs the local FFmpeg binary. Install the media tools included in the NOVA FETCH Docker image.")
