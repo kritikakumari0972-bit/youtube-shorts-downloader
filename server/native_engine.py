@@ -469,7 +469,189 @@ def _first_not_none(*values):
     return next((value for value in values if value is not None), None)
 
 
-def _download_dash(client: httpx.Client, url: str, job_dir: Path, job_id: str, on_update) -> Path:
+def _parse_iso_duration(value: str | None) -> float:
+    if not value:
+        return 0.0
+    match = re.fullmatch(
+        r"P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?",
+        value,
+    )
+    if not match:
+        return 0.0
+    days, hours, minutes, seconds = (float(item or 0) for item in match.groups())
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def _choose_dash_representation(representations: list, quality: str):
+    if not representations:
+        return None
+    if quality == "best":
+        return max(representations, key=lambda node: (
+            int(node.attrib.get("height", "0") or 0),
+            int(node.attrib.get("bandwidth", "0") or 0),
+        ))
+    cap = int(quality)
+    eligible = [
+        node for node in representations
+        if 0 < int(node.attrib.get("height", "0") or 0) <= cap
+    ]
+    if eligible:
+        return max(eligible, key=lambda node: (
+            int(node.attrib.get("height", "0") or 0),
+            int(node.attrib.get("bandwidth", "0") or 0),
+        ))
+    known = [node for node in representations if int(node.attrib.get("height", "0") or 0) > 0]
+    if known:
+        return min(known, key=lambda node: (
+            int(node.attrib.get("height", "0") or 0),
+            -int(node.attrib.get("bandwidth", "0") or 0),
+        ))
+    return max(representations, key=lambda node: int(node.attrib.get("bandwidth", "0") or 0))
+
+
+def _dash_template_value(pattern: str, *, representation_id: str, bandwidth: int,
+                         number: int | None = None, timestamp: int | None = None) -> str:
+    marker = "\x00NOVA_DOLLAR\x00"
+    value = pattern.replace("$", marker)
+
+    def replace(match):
+        token, width = match.group(1), match.group(2)
+        if token == "RepresentationID":
+            return representation_id
+        if token == "Bandwidth":
+            return str(bandwidth)
+        if token == "Number":
+            if number is None:
+                raise NativeEngineError("DASH template requires a segment number that was not supplied.")
+            return f"{number:0{int(width)}d}" if width else str(number)
+        if token == "Time":
+            if timestamp is None:
+                raise NativeEngineError("DASH template requires a segment time that was not supplied.")
+            return str(timestamp)
+        return match.group(0)
+
+    value = re.sub(r"\$(RepresentationID|Bandwidth|Number|Time)(?:%0(\d+)d)?\$", replace, value)
+    if re.search(r"\$[^$]+\$", value):
+        raise NativeEngineError("The DASH media template contains an unsupported variable.")
+    return value.replace(marker, "$")
+
+
+def _dash_template_segments(template: dict, timeline, *, period_duration: float,
+                            representation_id: str, bandwidth: int) -> tuple[str | None, list[str]]:
+    media = template.get("media")
+    if not media:
+        raise NativeEngineError("DASH SegmentTemplate has no media URL pattern.")
+    initialization = template.get("initialization")
+    init_url = (
+        _dash_template_value(initialization, representation_id=representation_id, bandwidth=bandwidth)
+        if initialization else None
+    )
+    start_number = int(template.get("startNumber", "1") or 1)
+    timescale = int(template.get("timescale", "1") or 1)
+    if timescale <= 0:
+        raise NativeEngineError("DASH SegmentTemplate timescale must be greater than zero.")
+
+    segments: list[str] = []
+    if timeline is not None:
+        entries = [item for item in timeline if _local_name(item.tag) == "S"]
+        current_time = 0
+        number = start_number
+        for index, entry in enumerate(entries):
+            duration = int(entry.attrib.get("d", "0") or 0)
+            if duration <= 0:
+                raise NativeEngineError("DASH SegmentTimeline contains a segment without a positive duration.")
+            if "t" in entry.attrib:
+                current_time = int(entry.attrib["t"])
+            repeat = int(entry.attrib.get("r", "0") or 0)
+            if repeat < -1:
+                raise NativeEngineError("DASH SegmentTimeline has an invalid negative repeat count.")
+            if repeat == -1:
+                next_time = None
+                if index + 1 < len(entries) and "t" in entries[index + 1].attrib:
+                    next_time = int(entries[index + 1].attrib["t"])
+                if next_time is None and period_duration:
+                    next_time = int(period_duration * timescale)
+                if next_time is None:
+                    raise NativeEngineError("DASH SegmentTimeline r=-1 needs a period duration or a following explicit timestamp.")
+                repeats = max(0, (next_time - current_time + duration - 1) // duration - 1)
+            else:
+                repeats = repeat
+            if len(segments) + repeats + 1 > MAX_SEGMENTS:
+                raise NativeEngineError("DASH SegmentTimeline exceeds the segment limit.")
+            for _ in range(repeats + 1):
+                segments.append(_dash_template_value(
+                    media, representation_id=representation_id, bandwidth=bandwidth,
+                    number=number, timestamp=current_time
+                ))
+                number += 1
+                current_time += duration
+        return init_url, segments
+
+    duration = int(template.get("duration", "0") or 0)
+    if duration <= 0:
+        raise NativeEngineError("DASH SegmentTemplate needs SegmentTimeline or a positive duration.")
+    if period_duration <= 0:
+        raise NativeEngineError("DASH duration-based SegmentTemplate needs a known static period duration.")
+    count = (int(period_duration * timescale) + duration - 1) // duration
+    if count < 1 or count > MAX_SEGMENTS:
+        raise NativeEngineError("DASH SegmentTemplate segment count is invalid or exceeds the limit.")
+    for index in range(count):
+        segments.append(_dash_template_value(
+            media, representation_id=representation_id, bandwidth=bandwidth,
+            number=start_number + index, timestamp=index * duration
+        ))
+    return init_url, segments
+
+
+def _dash_inherited_template(*elements) -> tuple[dict, object | None]:
+    attributes: dict[str, str] = {}
+    timeline = None
+    found = False
+    for element in elements:
+        template = _child(element, "SegmentTemplate")
+        if template is None:
+            continue
+        found = True
+        attributes.update(template.attrib)
+        candidate_timeline = _child(template, "SegmentTimeline")
+        if candidate_timeline is not None:
+            timeline = candidate_timeline
+    return (attributes if found else {}, timeline)
+
+
+def _write_dash_template(
+    client: httpx.Client, base_url: str, template: dict, timeline, period_duration: float,
+    representation, adaptation, target: Path, on_update,
+) -> Path:
+    representation_id = str(representation.attrib.get("id", "0"))
+    bandwidth = int(representation.attrib.get("bandwidth", adaptation.attrib.get("bandwidth", "0")) or 0)
+    init_name, segment_names = _dash_template_segments(
+        template, timeline, period_duration=period_duration,
+        representation_id=representation_id, bandwidth=bandwidth
+    )
+    if not segment_names:
+        raise NativeEngineError("DASH SegmentTemplate resolved to no media segments.")
+
+    resources = []
+    if init_name:
+        resources.append(urljoin(base_url, init_name))
+    resources.extend(urljoin(base_url, name) for name in segment_names)
+    state = {"total": 0}
+    with target.open("wb") as output:
+        for index, resource in enumerate(resources, start=1):
+            _write_resource(client, resource, output, on_update, state)
+            on_update(stage=f"NOVA Native · DASH segment {index}/{len(resources)}")
+    return target
+
+
+def _download_dash(
+    client: httpx.Client,
+    url: str,
+    job_dir: Path,
+    job_id: str,
+    on_update,
+    quality: str = "best",
+) -> Path:
     text, final_url = _read_manifest(client, url)
     if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
         raise NativeEngineError("Unsafe XML declarations are blocked.")
@@ -483,31 +665,49 @@ def _download_dash(client: httpx.Client, url: str, job_dir: Path, job_id: str, o
     if any(_local_name(node.tag) == "ContentProtection" for node in root.iter()):
         raise NativeEngineError("Encrypted or DRM-protected DASH is not supported.")
 
-    period = _child(root, "Period")
-    if period is None:
-        raise NativeEngineError("The DASH manifest has no Period.")
+    periods = [node for node in root if _local_name(node.tag) == "Period"]
+    if len(periods) != 1:
+        raise NativeEngineError("NOVA Native currently supports one static DASH Period per manifest.")
+    period = periods[0]
     adaptations = [node for node in period if _local_name(node.tag) == "AdaptationSet"]
-    if len(adaptations) > 1:
-        raise NativeEngineError("This DASH source separates audio/video adaptations; native DASH muxing is not implemented yet.")
-    if not adaptations:
-        raise NativeEngineError("The DASH manifest has no AdaptationSet.")
+    if len(adaptations) != 1:
+        raise NativeEngineError("This DASH source has separate or multiple audio/video adaptations. Multi-track DASH muxing is a later NOVA milestone.")
     adaptation = adaptations[0]
+
     representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
-    if len(representations) > 1:
-        representations.sort(key=lambda node: int(node.attrib.get("bandwidth", "0") or 0), reverse=True)
-    representation = representations[0] if representations else adaptation
+    representation = _choose_dash_representation(representations, quality) if representations else adaptation
+    if representation is None:
+        raise NativeEngineError("The DASH manifest has no usable representation.")
 
     base = _first_not_none(
         _child(representation, "BaseURL"), _child(adaptation, "BaseURL"),
         _child(period, "BaseURL"), _child(root, "BaseURL")
     )
     base_url = urljoin(final_url, (base.text or "").strip()) if base is not None and base.text else final_url
-    segment_list = _first_not_none(_child(representation, "SegmentList"), _child(adaptation, "SegmentList"))
+    period_duration = _parse_iso_duration(period.attrib.get("duration"))
+    if not period_duration:
+        total_duration = _parse_iso_duration(root.attrib.get("mediaPresentationDuration"))
+        period_start = _parse_iso_duration(period.attrib.get("start")) if period.attrib.get("start") else 0
+        period_duration = max(0.0, total_duration - period_start)
 
+    # SegmentTemplate attributes inherit from MPD -> Period -> AdaptationSet
+    # -> Representation, with the most specific declaration winning.
+    template, timeline = _dash_inherited_template(root, period, adaptation, representation)
+    if template:
+        mime = str(representation.attrib.get("mimeType") or adaptation.attrib.get("mimeType") or "")
+        extension = ".webm" if "webm" in mime else ".mp4"
+        target = job_dir / f"nova-native-{job_id}{extension}"
+        return _write_dash_template(
+            client, base_url, template, timeline, period_duration,
+            representation, adaptation, target, on_update
+        )
+
+    segment_list = _first_not_none(_child(representation, "SegmentList"), _child(adaptation, "SegmentList"))
     if segment_list is None:
         if base_url == final_url:
-            raise NativeEngineError("This DASH manifest uses SegmentTemplate or SegmentBase; NOVA Native currently supports SegmentList and direct BaseURL.")
-        target = job_dir / f"nova-native-{job_id}{Path(urlsplit(base_url).path).suffix or '.mp4'}"
+            raise NativeEngineError("This DASH manifest uses an unsupported SegmentBase or has no resolvable BaseURL.")
+        extension = Path(urlsplit(base_url).path).suffix or ".mp4"
+        target = job_dir / f"nova-native-{job_id}{extension}"
         state = {"total": 0}
         with target.open("wb") as output:
             _write_resource(client, base_url, output, on_update, state)
@@ -530,6 +730,8 @@ def _download_dash(client: httpx.Client, url: str, job_dir: Path, job_id: str, o
             _write_resource(client, resource, output, on_update, state)
             on_update(stage=f"NOVA Native · DASH segment {index}/{len(resources)}")
     return target
+
+
 
 
 def _extract_mp3(source: Path, job: dict) -> Path:
