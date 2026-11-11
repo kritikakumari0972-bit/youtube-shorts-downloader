@@ -154,7 +154,7 @@ def test_jsonld_video_object_resolves_content_url(tmp_path, monkeypatch):
       <script type="application/ld+json">
       {
         "@context": "https://schema.org",
-        "@type": "VideoObject",
+        "@type": "https://schema.org/VideoObject",
         "name": "Structured clip",
         "author": {"@type": "Person", "name": "NOVA creator"},
         "thumbnailUrl": "https://site.example/poster.jpg",
