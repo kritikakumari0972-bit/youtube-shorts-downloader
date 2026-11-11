@@ -755,7 +755,7 @@ def _dash_inherited_template(*elements) -> tuple[dict, object | None]:
 
 def _write_dash_template(
     client: httpx.Client, base_url: str, template: dict, timeline, period_duration: float,
-    representation, adaptation, target: Path, on_update,
+    representation, adaptation, target: Path, on_update, state: dict | None = None,
 ) -> Path:
     representation_id = str(representation.attrib.get("id", "0"))
     bandwidth = int(representation.attrib.get("bandwidth", adaptation.attrib.get("bandwidth", "0")) or 0)
@@ -770,8 +770,8 @@ def _write_dash_template(
     if init_name:
         resources.append(urljoin(base_url, init_name))
     resources.extend(urljoin(base_url, name) for name in segment_names)
-    state = {"total": 0}
-    with target.open("wb") as output:
+    if state is None:
+        with target.open("wb") as output:
         for index, resource in enumerate(resources, start=1):
             _write_resource(client, resource, output, on_update, state)
             on_update(stage=f"NOVA Native · DASH segment {index}/{len(resources)}")
@@ -831,7 +831,10 @@ def _download_dash_adaptation(
     target: Path,
     quality: str,
     on_update,
+    state: dict | None = None,
 ) -> Path:
+    if state is None:
+        state = {"total": 0}
     representations = [node for node in adaptation if _local_name(node.tag) == "Representation"]
     representation = _choose_dash_representation(representations, quality) if representations else adaptation
     if representation is None:
@@ -857,7 +860,7 @@ def _download_dash_adaptation(
         ).lower() else ".mp4")
         return _write_dash_template(
             client, base_url, template, timeline, period_duration,
-            representation, adaptation, target, on_update
+            representation, adaptation, target, on_update, state
         )
 
     segment_list = _first_not_none(
@@ -873,7 +876,6 @@ def _download_dash_adaptation(
             )
         extension = Path(urlsplit(base_url).path).suffix or target.suffix or ".mp4"
         target = target.with_suffix(extension)
-        state = {"total": 0}
         with target.open("wb") as output:
             _write_resource(client, base_url, output, on_update, state)
         return target
@@ -966,13 +968,14 @@ def _download_dash(
         audio_adaptation = max(
             typed["audio"], key=lambda node: _dash_adaptation_score(node, "audio")
         )
+        state = {"total": 0}
         video_path = _download_dash_adaptation(
             client, final_url, root, period, video_adaptation, job_dir,
-            job_dir / f"nova-native-{job_id}-video.mp4", quality, on_update
+            job_dir / f"nova-native-{job_id}-video.mp4", quality, on_update, state
         )
         audio_path = _download_dash_adaptation(
             client, final_url, root, period, audio_adaptation, job_dir,
-            job_dir / f"nova-native-{job_id}-audio.mp4", "best", on_update
+            job_dir / f"nova-native-{job_id}-audio.mp4", "best", on_update, state
         )
         on_update(stage="NOVA Native · Muxing DASH audio and video")
         return _mux_dash_tracks(video_path, audio_path, job_id)
