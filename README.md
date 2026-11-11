@@ -23,8 +23,8 @@ NOVA FETCH does not bypass DRM, paywalls, private accounts, login gates, or othe
 - Paste up to 10 source links in one batch
 - Metadata preview for supported sources
 - Native direct-file downloads
-- Native static HLS segment downloads
-- Native static DASH SegmentList/direct-BaseURL downloads
+- Native static HLS with quality selection and separate audio renditions
+- Native DASH SegmentList, SegmentTemplate and SegmentTimeline downloads
 - Local MP3 conversion with FFmpeg
 - Optional local website extractor pack for supported public sources
 - Quality selection, playlists and subtitle export through the compatibility pack
