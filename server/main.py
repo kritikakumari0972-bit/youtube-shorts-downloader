@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engines, native_engine, store
+from . import engines, store
 from .archives import package_subtitles
 from .engines import DownloadCancelled
 from .security import UnsafeURLError, safe_filename, validate_external_url
@@ -175,8 +175,6 @@ async def create_download(body: DownloadRequest, request: Request):
     active = sum(1 for item in store.list_jobs(500) if item.get("status") in {"queued", "downloading", "processing"})
     if active >= QUEUE_LIMIT:
         raise HTTPException(429, "The queue is full. Let a few downloads finish first.")
-    if body.provider == "native" and not native_engine.is_native_url(url):
-        raise HTTPException(400, "NOVA Native accepts direct media files and standard HLS/DASH manifest URLs. Use Automatic for supported website pages.")
     jid = uuid.uuid4().hex[:12]
     job = {
         "id": jid, "title": "Queued media", "creator": "", "url": url,
