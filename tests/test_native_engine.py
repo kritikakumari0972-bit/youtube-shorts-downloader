@@ -173,3 +173,148 @@ def test_jsonld_video_object_resolves_content_url(tmp_path, monkeypatch):
     assert result["title"] == "Structured clip"
     assert result["creator"] == "NOVA creator"
     assert result["thumbnail"] == "https://site.example/poster.jpg"
+
+
+def test_hls_byte_ranges_support_explicit_and_implicit_offsets(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    manifest = b"""#EXTM3U
+#EXTINF:1,
+#EXT-X-BYTERANGE:4@0
+blob.bin
+#EXTINF:1,
+#EXT-X-BYTERANGE:3
+blob.bin
+#EXT-X-ENDLIST
+"""
+    source = b"AAAABBBCC"
+
+    def handler(request):
+        if request.url.path == "/list.m3u8":
+            return httpx.Response(200, content=manifest, request=request)
+        value = request.headers.get("range", "")
+        match = __import__("re").fullmatch(r"bytes=(\d+)-(\d+)", value)
+        if not match:
+            return httpx.Response(400, request=request)
+        start, end = int(match.group(1)), int(match.group(2))
+        return httpx.Response(
+            206,
+            content=source[start:end + 1],
+            headers={"Content-Range": f"bytes {start}-{end}/{len(source)}"},
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        output = native_engine._download_hls(
+            client, "https://cdn.example/list.m3u8", tmp_path, "range-job",
+            lambda **kwargs: None
+        )
+
+    assert output.read_bytes() == b"AAAABBB"
+
+
+def test_hls_byte_range_refuses_server_that_ignores_range(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    manifest = b"#EXTM3U\n#EXTINF:1,\n#EXT-X-BYTERANGE:3@0\nblob.bin\n#EXT-X-ENDLIST\n"
+
+    def handler(request):
+        if request.url.path == "/list.m3u8":
+            return httpx.Response(200, content=manifest, request=request)
+        return httpx.Response(200, content=b"WHOLE RESOURCE", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(native_engine.NativeEngineError, match="ignored the HLS byte-range"):
+            native_engine._download_hls(
+                client, "https://cdn.example/list.m3u8", tmp_path, "range-ignore",
+                lambda **kwargs: None
+            )
+
+
+def test_dash_separate_video_and_audio_adaptations_are_muxed(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    mpd = b"""<MPD type="static" mediaPresentationDuration="PT4S">
+      <Period duration="PT4S">
+        <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64001f">
+          <BaseURL>https://cdn.example/video/</BaseURL>
+          <SegmentTemplate timescale="1" duration="2"
+             initialization="init-$RepresentationID$.mp4"
+             media="seg-$RepresentationID$-$Number$.m4s"/>
+          <Representation id="v360" bandwidth="400000" height="360"/>
+          <Representation id="v720" bandwidth="900000" height="720"/>
+          <Representation id="v1080" bandwidth="1800000" height="1080"/>
+        </AdaptationSet>
+        <AdaptationSet contentType="audio" mimeType="audio/mp4" codecs="mp4a.40.2">
+          <BaseURL>https://cdn.example/audio/</BaseURL>
+          <SegmentTemplate timescale="1" duration="2"
+             initialization="init-$RepresentationID$.mp4"
+             media="seg-$RepresentationID$-$Number$.m4s"/>
+          <Representation id="a128" bandwidth="128000"/>
+        </AdaptationSet>
+      </Period>
+    </MPD>"""
+    routes = {
+        "/manifest.mpd": mpd,
+        "/video/init-v720.mp4": b"VIDEO-INIT",
+        "/video/seg-v720-1.m4s": b"VIDEO-ONE",
+        "/video/seg-v720-2.m4s": b"VIDEO-TWO",
+        "/audio/init-a128.mp4": b"AUDIO-INIT",
+        "/audio/seg-a128-1.m4s": b"AUDIO-ONE",
+        "/audio/seg-a128-2.m4s": b"AUDIO-TWO",
+    }
+    tracks = {}
+
+    def fake_mux(video, audio, job_id):
+        tracks["video"] = video.read_bytes()
+        tracks["audio"] = audio.read_bytes()
+        output = tmp_path / f"{job_id}-muxed.mp4"
+        output.write_bytes(b"MUXED-AUDIO-VIDEO")
+        return output
+
+    monkeypatch.setattr(native_engine, "_mux_dash_tracks", fake_mux)
+    with mock_client(routes) as client:
+        output = native_engine._download_dash(
+            client, "https://cdn.example/manifest.mpd", tmp_path, "multi-track",
+            lambda **kwargs: None, quality="720"
+        )
+
+    assert output.read_bytes() == b"MUXED-AUDIO-VIDEO"
+    assert tracks["video"] == b"VIDEO-INITVIDEO-ONEVIDEO-TWO"
+    assert tracks["audio"] == b"AUDIO-INITAUDIO-ONEAUDIO-TWO"
+
+
+def test_dash_video_adaptation_is_classified_before_mixed_codec_tokens():
+    import xml.etree.ElementTree as ET
+
+    video = ET.fromstring(
+        '<AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.640028,mp4a.40.2"/>'
+    )
+    audio = ET.fromstring(
+        '<AdaptationSet contentType="audio" mimeType="audio/mp4" codecs="mp4a.40.2"/>'
+    )
+    subtitles = ET.fromstring(
+        '<AdaptationSet mimeType="application/ttml+xml"/>'
+    )
+
+    assert native_engine._dash_adaptation_kind(video) == "video"
+    assert native_engine._dash_adaptation_kind(audio) == "audio"
+    assert native_engine._dash_adaptation_kind(subtitles) == "text"
+
+
+def test_manifest_request_retries_transient_server_error(monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    monkeypatch.setattr(native_engine.time, "sleep", lambda seconds: None)
+    calls = {"count": 0}
+
+    def handler(request):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, content=b"manifest-ok", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        content, final_url = native_engine._read_manifest(
+            client, "https://cdn.example/manifest.mpd"
+        )
+
+    assert content == "manifest-ok"
+    assert final_url == "https://cdn.example/manifest.mpd"
+    assert calls["count"] == 2
