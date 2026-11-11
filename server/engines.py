@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import os
+import shutil
+import time
+import zipfile
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import urljoin, urlsplit
+
+import httpx
+
+try:
+    import yt_dlp
+except ImportError:  # Allows lightweight unit tests before dependencies are installed.
+    yt_dlp = None  # type: ignore[assignment]
+
+from . import store
+from .security import safe_filename, validate_external_url
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).expanduser().resolve()
+DOWNLOAD_DIR = DATA_DIR / "downloads"
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+COBALT_API_URL = os.getenv("COBALT_API_URL", "").strip().rstrip("/")
+COBALT_API_KEY = os.getenv("COBALT_API_KEY", "").strip()
+MAX_DOWNLOAD_BYTES = int(float(os.getenv("MAX_DOWNLOAD_GB", "8")) * 1024**3)
+
+
+class DownloadCancelled(Exception):
+    pass
+
+
+def tool_status() -> dict[str, Any]:
+    try:
+        version = yt_dlp.version.__version__ if yt_dlp is not None else "missing"
+    except Exception:
+        version = "installed" if yt_dlp is not None else "missing"
+    return {
+        "yt_dlp": version,
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+        "ffprobe": bool(shutil.which("ffprobe")),
+        "javascript_runtime": bool(shutil.which("deno") or shutil.which("node") or shutil.which("bun")),
+        "cobalt_configured": bool(COBALT_API_URL),
+    }
+
+
+def format_selector(mode: str, quality: str) -> str:
+    if mode == "audio":
+        return "bestaudio/best"
+    if quality == "best":
+        return "bv*+ba/b"
+    height = int(quality)
+    return f"bv*[height<={height}]+ba/b[height<={height}]/b"
+
+
+def _js_runtimes() -> dict[str, dict[str, Any]]:
+    if shutil.which("deno"):
+        return {"deno": {}}
+    if shutil.which("node"):
+        return {"node": {}}
+    if shutil.which("bun"):
+        return {"bun": {}}
+    return {}
+
+
+def extract_metadata(url: str) -> dict[str, Any]:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed. Install requirements.txt or use Docker.")
+    safe_url = validate_external_url(url)
+    options: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 25,
+        "retries": 2,
+        "extractor_retries": 2,
+        "js_runtimes": _js_runtimes(),
+    }
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(safe_url, download=False)
+
+    if info.get("_type") == "playlist" and info.get("entries"):
+        info = next((entry for entry in info["entries"] if entry), info)
+
+    formats = []
+    seen = set()
+    for item in info.get("formats") or []:
+        height = item.get("height")
+        if not height:
+            continue
+        key = (int(height), item.get("ext", ""), bool(item.get("acodec") not in (None, "none")))
+        if key in seen:
+            continue
+        seen.add(key)
+        formats.append({"height": int(height), "ext": item.get("ext") or "?", "has_audio": key[2]})
+    formats.sort(key=lambda item: item["height"], reverse=True)
+
+    duration = int(info.get("duration") or 0)
+    return {
+        "title": str(info.get("title") or "Untitled media")[:240],
+        "creator": str(info.get("uploader") or info.get("channel") or "Unknown creator")[:160],
+        "thumbnail": info.get("thumbnail"),
+        "duration": duration,
+        "duration_label": _format_duration(duration),
+        "source": info.get("extractor_key") or info.get("extractor") or "Supported source",
+        "webpage_url": info.get("webpage_url") or safe_url,
+        "formats": formats[:16],
+        "is_live": bool(info.get("is_live")),
+        "playlist_count": info.get("playlist_count"),
+    }
+
+
+def _format_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return "Live / unknown length"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
+def _progress_hook(job_id: str, on_update: Callable[..., None]) -> Callable[[dict[str, Any]], None]:
+    last_update = 0.0
+
+    def hook(event: dict[str, Any]) -> None:
+        nonlocal last_update
+        job = store.get_job(job_id)
+        if job and job.get("cancel_requested"):
+            raise DownloadCancelled("Download cancelled by user.")
+
+        info = event.get("info_dict") or {}
+        if info.get("title"):
+            on_update(
+                title=str(info.get("title"))[:240],
+                creator=str(info.get("uploader") or info.get("channel") or "")[:160],
+            )
+        if event.get("status") != "downloading":
+            return
+        now = time.monotonic()
+        if now - last_update < 0.45:
+            return
+        last_update = now
+
+        total = event.get("total_bytes") or event.get("total_bytes_estimate") or 0
+        downloaded = event.get("downloaded_bytes") or 0
+        percent = round(downloaded * 100 / total, 1) if total else 0
+        speed = event.get("speed") or 0
+        eta = event.get("eta")
+        on_update(
+            percent=min(percent, 99.5),
+            downloaded_bytes=int(downloaded),
+            total_bytes=int(total),
+            speed=_human_bytes(speed) + "/s" if speed else "—",
+            eta=f"{int(eta)}s" if eta is not None else "—",
+        )
+
+    return hook
+
+
+def _human_bytes(value: float | int) -> str:
+    amount = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if amount < 1024 or unit == "GB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} GB"
+
+
+def _download_with_ytdlp(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed. Install requirements.txt or use Docker.")
+    job_dir = DOWNLOAD_DIR / job["id"]
+    job_dir.mkdir(parents=True, exist_ok=True)
+    options: dict[str, Any] = {
+        "format": format_selector(job["mode"], job["quality"]),
+        "outtmpl": str(job_dir / "%(title).160B [%(id)s].%(ext)s"),
+        "restrictfilenames": True,
+        "windowsfilenames": True,
+        "noplaylist": not bool(job.get("playlist")),
+        "playlistend": 50,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "concurrent_fragment_downloads": 4,
+        "progress_hooks": [_progress_hook(job["id"], on_update)],
+        "js_runtimes": _js_runtimes(),
+        "overwrites": False,
+        "max_filesize": MAX_DOWNLOAD_BYTES,
+    }
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        options["ffmpeg_location"] = ffmpeg
+    if job["mode"] == "audio":
+        options["format"] = "bestaudio/best"
+        options["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": str(job.get("audio_bitrate", "192")),
+            }
+        ]
+    else:
+        options["merge_output_format"] = job.get("container", "mp4")
+
+    postprocessors = options.setdefault("postprocessors", [])
+    if job.get("embed_metadata"):
+        postprocessors.append({"key": "FFmpegMetadata"})
+    if job.get("embed_thumbnail"):
+        options["writethumbnail"] = True
+        postprocessors.append({"key": "EmbedThumbnail"})
+    if job.get("subtitles"):
+        options["writesubtitles"] = True
+        options["writeautomaticsub"] = True
+        options["subtitleslangs"] = [job.get("subtitle_lang") or "en"]
+        options["subtitlesformat"] = "srt/best"
+
+    def postprocessor_hook(event: dict[str, Any]) -> None:
+        if event.get("status") == "started":
+            on_update(status="processing", stage="FFmpeg processing")
+        current = store.get_job(job["id"])
+        if current and current.get("cancel_requested"):
+            raise DownloadCancelled("Download cancelled by user.")
+
+    options["postprocessor_hooks"] = [postprocessor_hook]
+    with yt_dlp.YoutubeDL(options) as downloader:
+        downloader.download([validate_external_url(job["url"])])
+
+    return _collect_output(job_dir, job["id"])
+
+
+def _trusted_cobalt_hosts() -> set[str]:
+    if not COBALT_API_URL:
+        return set()
+    host = urlsplit(COBALT_API_URL).hostname
+    return {host} if host else set()
+
+
+def _download_with_cobalt(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
+    if not COBALT_API_URL:
+        raise RuntimeError("Cobalt is not configured. Set COBALT_API_URL to an instance you own or are allowed to use.")
+
+    payload: dict[str, Any] = {
+        "url": validate_external_url(job["url"]),
+        "downloadMode": "audio" if job["mode"] == "audio" else "auto",
+        "videoQuality": "max" if job["quality"] == "best" else job["quality"],
+        "youtubeVideoContainer": job.get("container", "mp4"),
+        "audioFormat": "mp3",
+        "audioBitrate": job.get("audio_bitrate", "192"),
+        "filenameStyle": "pretty",
+        "disableMetadata": not bool(job.get("embed_metadata")),
+    }
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if COBALT_API_KEY:
+        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+
+    with httpx.Client(timeout=45, follow_redirects=False) as client:
+        response = client.post(COBALT_API_URL + "/", json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+        state = data.get("status")
+        if state in {"error", "picker", "local-processing"}:
+            code = (data.get("error") or {}).get("code") or state
+            raise RuntimeError(f"Cobalt returned '{code}'. This source may need a different provider or media picker flow.")
+        if state not in {"tunnel", "redirect"} or not data.get("url"):
+            raise RuntimeError("Cobalt returned an unsupported or incomplete response.")
+
+        job_dir = DOWNLOAD_DIR / job["id"]
+        job_dir.mkdir(parents=True, exist_ok=True)
+        filename = safe_filename(data.get("filename") or "cobalt-media")
+        suffix = ".mp3" if job["mode"] == "audio" else ".mp4"
+        target = job_dir / (filename if Path(filename).suffix else filename + suffix)
+        current_url = data["url"]
+        trusted_hosts = _trusted_cobalt_hosts()
+
+        for _ in range(6):
+            validate_external_url(current_url, trusted_hosts=trusted_hosts)
+            with client.stream("GET", current_url) as download_response:
+                if download_response.is_redirect:
+                    location = download_response.headers.get("location")
+                    if not location:
+                        raise RuntimeError("Cobalt returned an invalid download redirect.")
+                    current_url = urljoin(current_url, location)
+                    continue
+                download_response.raise_for_status()
+                total = int(download_response.headers.get("content-length") or 0)
+                received = 0
+                with target.open("wb") as output:
+                    for chunk in download_response.iter_bytes(chunk_size=1024 * 256):
+                        job_state = store.get_job(job["id"])
+                        if job_state and job_state.get("cancel_requested"):
+                            raise DownloadCancelled("Download cancelled by user.")
+                        received += len(chunk)
+                        if received > MAX_DOWNLOAD_BYTES:
+                            raise RuntimeError("Download exceeds the configured size limit.")
+                        output.write(chunk)
+                        percent = round(received * 100 / total, 1) if total else 0
+                        on_update(percent=min(percent, 99.5), downloaded_bytes=received, total_bytes=total)
+                if target.stat().st_size == 0:
+                    raise RuntimeError("The source returned an empty file.")
+                return target
+        raise RuntimeError("Too many redirects while retrieving the Cobalt file.")
+
+
+def _collect_output(job_dir: Path, job_id: str) -> Path:
+    allowed = {
+        ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".mp3", ".m4a",
+        ".opus", ".ogg", ".wav", ".flac", ".ts", ".gif", ".jpg", ".jpeg", ".png",
+    }
+    files = [
+        path for path in job_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in allowed and path.stat().st_size > 0
+    ]
+    if not files:
+        raise RuntimeError("The extractor finished but no downloadable media file was produced.")
+    files.sort(key=lambda path: path.stat().st_size, reverse=True)
+    if len(files) == 1:
+        return files[0]
+
+    archive = job_dir / f"nova-fetch-{job_id}.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as bundle:
+        for path in files:
+            bundle.write(path, arcname=path.name)
+    return archive
+
+
+def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
+    provider = job.get("provider", "auto")
+    if provider == "cobalt":
+        return _download_with_cobalt(job, on_update)
+    if provider == "yt-dlp":
+        return _download_with_ytdlp(job, on_update)
+
+    try:
+        return _download_with_ytdlp(job, on_update)
+    except DownloadCancelled:
+        raise
+    except Exception as primary_error:
+        if not COBALT_API_URL:
+            raise RuntimeError(str(primary_error)[:500]) from primary_error
+        on_update(stage="Trying configured Cobalt instance", status="downloading")
+        try:
+            return _download_with_cobalt(job, on_update)
+        except Exception as cobalt_error:
+            raise RuntimeError(
+                f"yt-dlp: {str(primary_error)[:220]} | Cobalt: {str(cobalt_error)[:220]}"
+            ) from cobalt_error
