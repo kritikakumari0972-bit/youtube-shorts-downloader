@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import engines, store
+from .archives import package_subtitles
 from .engines import DownloadCancelled
 from .security import UnsafeURLError, safe_filename, validate_external_url
 
@@ -89,6 +90,8 @@ async def worker():
 
             try:
                 output = await asyncio.to_thread(engines.perform_download, job, update)
+                if job.get("subtitles") and job.get("provider") != "cobalt":
+                    output = await asyncio.to_thread(package_subtitles, output, FILES / jid)
                 current = store.get_job(jid) or {}
                 if current.get("cancel_requested"):
                     raise DownloadCancelled("Cancelled by user.")
@@ -161,6 +164,8 @@ async def preview(url: str):
 async def create_download(body: DownloadRequest, request: Request):
     if not body.rights_confirmed:
         raise HTTPException(400, "Confirm you own the media or have permission to save it.")
+    if body.provider == "cobalt" and body.subtitles:
+        raise HTTPException(400, "Subtitle export uses yt-dlp. Choose Automatic or yt-dlp for this job.")
     try:
         url = validate_external_url(body.url)
     except UnsafeURLError as exc:
