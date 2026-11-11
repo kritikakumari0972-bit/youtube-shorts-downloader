@@ -44,7 +44,7 @@ def test_dash_segment_template_expands_representation_and_number(tmp_path, monke
             client, "https://cdn.example/manifest.mpd", tmp_path, "dash-job",
             lambda **kwargs: None, quality="720"
         )
-    assert output.read_bytes() == b"INITONETWOTTHREE".replace(b"TTHREE", b"THREE")
+    assert output.read_bytes() == b"INITONETWOTHREE"
     assert output.suffix == ".mp4"
 
 
@@ -76,7 +76,6 @@ def test_dash_duration_template_generates_expected_segment_count(tmp_path, monke
 
 
 def test_dash_template_rejects_unbounded_negative_repeat():
-    timeline = type("Timeline", (), {})()
     import xml.etree.ElementTree as ET
     timeline = ET.fromstring('<SegmentTimeline><S d="2" r="-1"/></SegmentTimeline>')
     template = {"media": "seg-$Number$.m4s", "duration": "2", "startNumber": "1", "timescale": "1"}
