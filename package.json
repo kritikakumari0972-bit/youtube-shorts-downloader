@@ -1,24 +1,10 @@
 {
-  "name": "youtube-shorts-downloader-netlify",
-  "version": "2.1.0",
-  "description": "YouTube Shorts & Videos Downloader with Netlify Functions support",
+  "name": "nova-fetch",
+  "version": "1.0.0",
   "private": true,
+  "description": "NOVA FETCH self-hosted media toolkit; the runtime is Python/FastAPI.",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
-    "netlify:dev": "netlify dev"
-  },
-  "dependencies": {
-    "next": "^14.2.15",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "ytdl-core": "^4.11.5"
-  },
-  "devDependencies": {
-    "@netlify/functions": "^2.4.0",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "^14.2.15"
+    "dev": "python -m uvicorn server.main:app --reload --host 127.0.0.1 --port 8080",
+    "start": "python -m uvicorn server.main:app --host 0.0.0.0 --port 8080"
   }
 }
