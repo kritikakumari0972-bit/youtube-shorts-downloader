@@ -19,7 +19,7 @@ function openSettings() { $("api-key-input").value=key(); $("settings-modal").cl
 function closeSettings() { $("settings-modal").classList.add("hidden"); }
 function displayTools(tools) {
   const rows=[
-    ["YT-DLP",tools.yt_dlp,tools.yt_dlp!=="missing"],
+    ["YT-DLP",tools.yt_dlp,tools.yt_dlp!=="not installed"],
     ["FFMPEG",tools.ffmpeg?"READY":"MISSING",tools.ffmpeg],
     ["FFPROBE",tools.ffprobe?"READY":"MISSING",tools.ffprobe],
     ["JS RUNTIME",tools.javascript_runtime?"READY":"MISSING",tools.javascript_runtime],
