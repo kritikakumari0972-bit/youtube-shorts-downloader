@@ -1,0 +1,24 @@
+services:
+  nova-fetch:
+    build: .
+    container_name: nova-fetch
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      MAX_ACTIVE_JOBS: ${MAX_ACTIVE_JOBS:-2}
+      MAX_QUEUED_JOBS: ${MAX_QUEUED_JOBS:-12}
+      MAX_DOWNLOAD_GB: ${MAX_DOWNLOAD_GB:-8}
+    ports:
+      # Local-only by default. Change only after configuring authentication and a reverse proxy.
+      - "127.0.0.1:${NOVA_FETCH_PORT:-8080}:8080"
+    volumes:
+      - nova_fetch_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  nova_fetch_data:
