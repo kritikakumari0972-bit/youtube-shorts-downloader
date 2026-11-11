@@ -84,7 +84,7 @@ Set the variables in `.env.example` in your shell before starting. Open **http:/
 ## Engine selection
 
 - **Automatic · NOVA first** — use NOVA Native for direct media/HLS/DASH links; use the local compatibility pack for supported website pages.
-- **NOVA Native only** — first-party native engine and registered first-party adapters only. It accepts direct media files, exposed HTML5 media, and the supported HLS/DASH subset; native subtitle extraction is not yet included.
+- **NOVA Native only** — first-party native engine and registered first-party adapters only. It accepts direct media files, exposed HTML5 media, and the supported HLS/DASH subset. Subtitle extraction is limited to static HLS master playlists with declared plain WebVTT renditions; DASH/direct-file subtitles use the local compatibility pack in Automatic mode.
 - **Local site-extractor pack** — use the local yt-dlp compatibility component for its supported extractors.
 
 The optional extractor component is installed in the same container. It does not send a request to a third-party downloader service. It does request the original media site and media CDN, as any downloader must.
