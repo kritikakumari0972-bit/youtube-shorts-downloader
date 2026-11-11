@@ -896,7 +896,6 @@ def _download_dash_adaptation(
     if not resources or len(resources) > MAX_SEGMENTS:
         raise NativeEngineError("DASH SegmentList is empty or exceeds the segment limit.")
 
-    state = {"total": 0}
     with target.open("wb") as output:
         for index, resource in enumerate(resources, start=1):
             _write_resource(client, resource, output, on_update, state)
