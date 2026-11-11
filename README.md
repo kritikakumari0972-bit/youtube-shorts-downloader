@@ -11,9 +11,9 @@ The project has two layers:
 
 ## Important compatibility boundary
 
-No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, static HLS playlists without encryption, and static DASH manifests using SegmentList or a direct BaseURL. DASH SegmentTemplate/SegmentBase, live playlists, separate audio/video DASH adaptations, HLS byte ranges and protected streams are not implemented by NOVA Native yet.
+No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, public HTML5 pages that expose a direct video/audio source in markup or Open Graph metadata, static HLS playlists without encryption, and static DASH manifests using SegmentList or a direct BaseURL. DASH SegmentTemplate/SegmentBase, live playlists, separate audio/video DASH adaptations, HLS byte ranges and protected streams are not implemented by NOVA Native yet.
 
-Automatic mode uses NOVA Native first for direct media/manifest URLs, then the local compatibility extractor when appropriate. For normal website pages, it uses the locally installed compatibility extractor. No outside downloader service is required.
+Automatic mode uses NOVA Native first for direct media/manifest URLs and public HTML5 pages with a directly exposed media source, then the local compatibility extractor when appropriate. It does not execute the page's JavaScript or use browser cookies. For pages requiring custom site-specific logic, it uses the locally installed compatibility extractor. No outside downloader service is required.
 
 NOVA FETCH does not bypass DRM, paywalls, private accounts, login gates, or other access controls. Use it only for media you own or have permission to save.
 
