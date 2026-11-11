@@ -362,3 +362,40 @@ def test_hls_implicit_range_without_previous_same_resource_is_rejected(tmp_path,
                 client, "https://cdn.example/list.m3u8", tmp_path, "implicit-invalid",
                 lambda **kwargs: None
             )
+
+
+@pytest.mark.parametrize(
+    ("video_ext", "audio_ext", "expected_ext", "expected_muxer"),
+    [
+        (".webm", ".webm", ".webm", "webm"),
+        (".mp4", ".webm", ".mkv", "matroska"),
+        (".mp4", ".m4a", ".mp4", "mp4"),
+    ],
+)
+def test_dash_muxer_chooses_compatible_container(
+    tmp_path, monkeypatch, video_ext, audio_ext, expected_ext, expected_muxer
+):
+    from types import SimpleNamespace
+
+    video = tmp_path / f"video{video_ext}"
+    audio = tmp_path / f"audio{audio_ext}"
+    video.write_bytes(b"video")
+    audio.write_bytes(b"audio")
+    command_seen = {}
+
+    monkeypatch.setattr(native_engine.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    def fake_run(command, **kwargs):
+        command_seen["value"] = command
+        __import__("pathlib").Path(command[-1]).write_bytes(b"muxed")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(native_engine.subprocess, "run", fake_run)
+    output = native_engine._mux_dash_tracks(video, audio, "format-job")
+
+    assert output.suffix == expected_ext
+    assert output.read_bytes() == b"muxed"
+    if expected_muxer == "mp4":
+        assert "-movflags" in command_seen["value"]
+    else:
+        assert command_seen["value"][-3:-1] == ["-f", expected_muxer]
