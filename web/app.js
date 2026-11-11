@@ -23,11 +23,10 @@ function displayTools(tools) {
     ["FFMPEG",tools.ffmpeg?"READY":"MISSING",tools.ffmpeg],
     ["FFPROBE",tools.ffprobe?"READY":"MISSING",tools.ffprobe],
     ["JS RUNTIME",tools.javascript_runtime?"READY":"MISSING",tools.javascript_runtime],
-    ["COBALT",tools.cobalt_configured?"CONNECTED":"OPTIONAL",tools.cobalt_configured]
+    ["NOVA NATIVE",tools.native_engine||"BUILT-IN",true],
+    ["EXTERNAL API",tools.external_downloader_api?"ENABLED":"DISABLED",!tools.external_downloader_api]
   ];
   $("engine-status").innerHTML=rows.map(([name,value,active])=>'<span class="tool '+(active?"":"off")+'"><i></i>'+esc(name)+" · "+esc(value)+"</span>").join("");
-  $("cobalt-option").disabled=!tools.cobalt_configured;
-  $("cobalt-option").textContent=tools.cobalt_configured?"Cobalt · connected":"Cobalt · not configured";
 }
 async function loadConfig() {
   try {
