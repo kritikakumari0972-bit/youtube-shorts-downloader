@@ -24,7 +24,7 @@ This document describes the first-party native engine. It is intentionally a sub
 | Live or unfinished playlists | Not supported |
 | Nested master playlists | Not supported |
 | AES or other encrypted playlists | Not supported; non-NONE key methods are rejected |
-| Native subtitle renditions | Not yet supported |
+| Native subtitle renditions | Partial: static HLS master playlists with declared plain WebVTT renditions; language selection and timestamp-map normalization; packaged as a VTT sidecar |
 
 Every range request must receive HTTP 206 Partial Content and an exact matching Content-Range. If the server ignores the Range header or returns a mismatched/incomplete range, NOVA fails the job instead of appending the wrong bytes.
 
