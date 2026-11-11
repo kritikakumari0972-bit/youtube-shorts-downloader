@@ -523,6 +523,8 @@ def _format_webvtt_time(milliseconds: int) -> str:
 def _merge_webvtt_segments(payloads: list[bytes]) -> str:
     """Normalize HLS WebVTT timestamp maps and join cue blocks into one VTT file."""
     cue_blocks: list[str] = []
+    previous_raw_mpegts: int | None = None
+    unwrapped_mpegts = 0
     cue_pattern = re.compile(
         r"^(\d{2,}:\d{2}(?::\d{2})?\.\d{3})\s+-->\s+"
         r"(\d{2,}:\d{2}(?::\d{2})?\.\d{3})(.*)$"
@@ -550,8 +552,20 @@ def _merge_webvtt_segments(payloads: list[bytes]) -> str:
         )
         if mapping:
             local_ms = _webvtt_time_ms(mapping.group(1))
-            mpeg_ticks = int(mapping.group(2))
-            shift_ms = round(mpeg_ticks * 1000 / 90_000) - local_ms
+            raw_mpegts = int(mapping.group(2))
+            if raw_mpegts >= (1 << 33):
+                raise NativeEngineError("An HLS WebVTT timestamp map contains an out-of-range MPEGTS value.")
+            if previous_raw_mpegts is None:
+                unwrapped_mpegts = raw_mpegts
+            else:
+                delta = raw_mpegts - previous_raw_mpegts
+                if delta < -(1 << 32):
+                    delta += 1 << 33
+                elif delta > (1 << 32):
+                    delta -= 1 << 33
+                unwrapped_mpegts += delta
+            previous_raw_mpegts = raw_mpegts
+            shift_ms = round(unwrapped_mpegts * 1000 / 90_000) - local_ms
 
         body_text = "\n".join(body).strip()
         if not body_text:
@@ -570,6 +584,8 @@ def _merge_webvtt_segments(payloads: list[bytes]) -> str:
                     f"{_format_webvtt_time(end_ms)}{match.group(3)}"
                 )
                 changed = True
+            if "-->" in block and not changed:
+                raise NativeEngineError("An HLS WebVTT segment contains a malformed cue time range.")
             if changed or block.strip().startswith(("NOTE", "STYLE", "REGION")):
                 cue_blocks.append("\n".join(block_lines))
 
