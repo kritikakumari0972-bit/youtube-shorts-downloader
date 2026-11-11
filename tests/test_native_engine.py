@@ -318,3 +318,47 @@ def test_manifest_request_retries_transient_server_error(monkeypatch):
     assert content == "manifest-ok"
     assert final_url == "https://cdn.example/manifest.mpd"
     assert calls["count"] == 2
+
+
+def test_hls_initialization_map_supports_byte_range(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    manifest = b"""#EXTM3U
+#EXT-X-MAP:URI="container.mp4",BYTERANGE="4@0"
+#EXTINF:1,
+#EXT-X-BYTERANGE:3@4
+container.mp4
+#EXT-X-ENDLIST
+"""
+    source = b"INITMEDIATA"
+
+    def handler(request):
+        if request.url.path == "/list.m3u8":
+            return httpx.Response(200, content=manifest, request=request)
+        match = __import__("re").fullmatch(r"bytes=(\d+)-(\d+)", request.headers.get("range", ""))
+        if not match:
+            return httpx.Response(400, request=request)
+        start, end = int(match.group(1)), int(match.group(2))
+        return httpx.Response(
+            206, content=source[start:end + 1],
+            headers={"Content-Range": f"bytes {start}-{end}/{len(source)}"},
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        output = native_engine._download_hls(
+            client, "https://cdn.example/list.m3u8", tmp_path, "map-range",
+            lambda **kwargs: None
+        )
+
+    assert output.read_bytes() == b"INITMED"
+
+
+def test_hls_implicit_range_without_previous_same_resource_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    manifest = b"#EXTM3U\n#EXTINF:1,\n#EXT-X-BYTERANGE:4\ncontainer.bin\n#EXT-X-ENDLIST\n"
+    with mock_client({"/list.m3u8": manifest}) as client:
+        with pytest.raises(native_engine.NativeEngineError, match="omitted its offset"):
+            native_engine._download_hls(
+                client, "https://cdn.example/list.m3u8", tmp_path, "implicit-invalid",
+                lambda **kwargs: None
+            )
