@@ -909,12 +909,16 @@ def _mux_dash_tracks(video_track: Path, audio_track: Path, job_id: str) -> Path:
         raise NativeEngineError(
             "This DASH source uses separate audio and video tracks. Install the local FFmpeg binary to mux them."
         )
-    output = video_track.parent / f"nova-native-{job_id}.mp4"
+    suffixes = {video_track.suffix.lower(), audio_track.suffix.lower()}
+    output_ext = ".webm" if suffixes == {".webm"} else ".mkv" if ".webm" in suffixes else ".mp4"
+    output = video_track.parent / f"nova-native-{job_id}{output_ext}"
     result = subprocess.run(
         [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
          "-i", str(video_track), "-i", str(audio_track),
          "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
-         "-movflags", "+faststart", str(output)],
+         *(["-f", "webm"] if output_ext == ".webm" else []),
+         *(["-f", "matroska"] if output_ext == ".mkv" else []),
+         "-movflags", "+faststart" if output_ext == ".mp4" else "+faststart", str(output)],
         capture_output=True, text=True, timeout=900, check=False
     )
     if result.returncode != 0 or not output.exists() or output.stat().st_size == 0:
@@ -922,7 +926,6 @@ def _mux_dash_tracks(video_track: Path, audio_track: Path, job_id: str) -> Path:
             f"FFmpeg could not mux the DASH tracks: {(result.stderr or 'unknown error')[-300:]}"
         )
     return output
-
 
 def _download_dash(
     client: httpx.Client,
