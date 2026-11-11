@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import time
+from zipfile import ZIP_DEFLATED, ZipFile
 from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
@@ -490,6 +491,199 @@ def _download_hls_media_playlist(
 
 
 
+
+def _webvtt_time_ms(value: str) -> int:
+    parts = value.strip().split(":")
+    try:
+        if len(parts) == 2:
+            hours, minutes, seconds = 0, int(parts[0]), float(parts[1])
+        elif len(parts) == 3:
+            hours, minutes, seconds = int(parts[0]), int(parts[1]), float(parts[2])
+        else:
+            raise ValueError
+    except ValueError as exc:
+        raise NativeEngineError("An HLS WebVTT segment contains an invalid cue timestamp.") from exc
+    if hours < 0 or minutes < 0 or seconds < 0 or minutes >= 60 or seconds >= 60:
+        raise NativeEngineError("An HLS WebVTT segment contains an out-of-range cue timestamp.")
+    return round((hours * 3600 + minutes * 60 + seconds) * 1000)
+
+
+def _format_webvtt_time(milliseconds: int) -> str:
+    value = max(0, int(milliseconds))
+    hours, remainder = divmod(value, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def _merge_webvtt_segments(payloads: list[bytes]) -> str:
+    """Normalize HLS WebVTT timestamp maps and join cue blocks into one VTT file."""
+    cue_blocks: list[str] = []
+    cue_pattern = re.compile(
+        r"^(\\d{2,}:\\d{2}(?::\\d{2})?\\.\\d{3})\\s+-->\\s+"
+        r"(\\d{2,}:\\d{2}(?::\\d{2})?\\.\\d{3})(.*)$"
+    )
+
+    for payload in payloads:
+        try:
+            content = payload.decode("utf-8-sig").replace("\\r\\n", "\\n").replace("\\r", "\\n")
+        except UnicodeDecodeError as exc:
+            raise NativeEngineError("An HLS subtitle segment is not valid UTF-8 WebVTT.") from exc
+        lines = content.split("\\n")
+        if not lines or not lines[0].lstrip().startswith("WEBVTT"):
+            raise NativeEngineError(
+                "The selected HLS subtitle rendition is not plain WebVTT. Fragmented MP4/other subtitle formats are not supported."
+            )
+
+        separator = next((index for index, line in enumerate(lines) if not line.strip()), None)
+        header = "\\n".join(lines[:separator]) if separator is not None else lines[0]
+        body = lines[separator + 1:] if separator is not None else lines[1:]
+        shift_ms = 0
+        mapping = re.search(
+            r"X-TIMESTAMP-MAP\\s*=\\s*LOCAL:([^,\\s]+)\\s*,\\s*MPEGTS:(\\d+)",
+            header,
+            re.I,
+        )
+        if mapping:
+            local_ms = _webvtt_time_ms(mapping.group(1))
+            mpeg_ticks = int(mapping.group(2))
+            shift_ms = round(mpeg_ticks * 1000 / 90_000) - local_ms
+
+        body_text = "\\n".join(body).strip()
+        if not body_text:
+            continue
+        for block in re.split(r"\\n\\s*\\n", body_text):
+            block_lines = block.splitlines()
+            changed = False
+            for index, line in enumerate(block_lines):
+                match = cue_pattern.match(line.strip())
+                if not match:
+                    continue
+                start_ms = max(0, _webvtt_time_ms(match.group(1)) + shift_ms)
+                end_ms = max(start_ms, _webvtt_time_ms(match.group(2)) + shift_ms)
+                block_lines[index] = (
+                    f"{_format_webvtt_time(start_ms)} --> "
+                    f"{_format_webvtt_time(end_ms)}{match.group(3)}"
+                )
+                changed = True
+            if changed or block.strip().startswith(("NOTE", "STYLE", "REGION")):
+                cue_blocks.append("\\n".join(block_lines))
+
+    if not cue_blocks:
+        raise NativeEngineError("The selected HLS subtitle rendition contained no readable WebVTT cues.")
+    return "WEBVTT\\n\\n" + "\\n\\n".join(cue_blocks).strip() + "\\n"
+
+
+def _download_hls_subtitle_playlist(
+    client: httpx.Client,
+    playlist_url: str,
+    target: Path,
+    job_id: str,
+    on_update,
+    state: dict,
+) -> Path:
+    text, final_url = _read_manifest(client, playlist_url)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or lines[0] != "#EXTM3U":
+        raise NativeEngineError("The HLS subtitle playlist is malformed.")
+    if "#EXT-X-ENDLIST" not in lines:
+        raise NativeEngineError("Live or unfinished HLS subtitle playlists are not supported.")
+    if any(line.startswith("#EXT-X-STREAM-INF:") for line in lines):
+        raise NativeEngineError("Nested HLS subtitle master playlists are not supported.")
+    for line in lines:
+        if line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:")):
+            method = _parse_hls_attrs(line.split(":", 1)[1]).get("METHOD", "")
+            if method != "NONE":
+                raise NativeEngineError("Encrypted or DRM-protected HLS subtitles are not supported.")
+        if line.startswith("#EXT-X-MAP:"):
+            raise NativeEngineError(
+                "Fragmented MP4 HLS subtitle segments are not supported; plain WebVTT segments are required."
+            )
+
+    previous_ends: dict[str, int] = {}
+    pending_range: str | None = None
+    segments: list[tuple[str, tuple[int, int] | None]] = []
+    for line in lines:
+        if line.startswith("#EXT-X-BYTERANGE:"):
+            pending_range = line.split(":", 1)[1].strip()
+        elif not line.startswith("#"):
+            resource = urljoin(final_url, line)
+            byte_range = (
+                _resolve_hls_byterange(pending_range, resource, previous_ends)
+                if pending_range is not None else None
+            )
+            segments.append((resource, byte_range))
+            pending_range = None
+    if pending_range is not None:
+        raise NativeEngineError("The HLS subtitle playlist ends with a BYTERANGE without a segment.")
+    if not segments or len(segments) > MAX_SEGMENTS:
+        raise NativeEngineError("The HLS subtitle playlist is empty or exceeds the segment limit.")
+
+    payloads = []
+    for index, (resource, byte_range) in enumerate(segments, start=1):
+        part = target.parent / f".nova-{job_id}-subtitle-{index:05d}.part"
+        try:
+            with part.open("wb") as output:
+                _write_resource(
+                    client, resource, output, on_update, state, byte_range=byte_range
+                )
+            payloads.append(part.read_bytes())
+        finally:
+            part.unlink(missing_ok=True)
+        on_update(stage=f"NOVA Native · WebVTT subtitle {index}/{len(segments)}")
+
+    target.write_text(_merge_webvtt_segments(payloads), encoding="utf-8")
+    return target
+
+
+def _choose_hls_subtitle_rendition(
+    renditions: list[dict],
+    group_id: str | None,
+    language: str,
+) -> dict:
+    candidates = [
+        item for item in renditions
+        if group_id and item.get("GROUP-ID") == group_id and item.get("URI")
+    ]
+    if not candidates:
+        raise NativeEngineError(
+            "The selected HLS video variant does not declare a downloadable subtitle rendition."
+        )
+
+    wanted = (language or "").strip().lower().replace("_", "-")
+    if wanted:
+        matches = [
+            item for item in candidates
+            if (item.get("LANGUAGE") or "").lower().replace("_", "-") == wanted
+            or (item.get("LANGUAGE") or "").lower().replace("_", "-").startswith(wanted + "-")
+            or wanted.startswith((item.get("LANGUAGE") or "").lower().replace("_", "-") + "-")
+        ]
+        if matches:
+            return next((item for item in matches if item.get("DEFAULT") == "YES"), matches[0])
+        available = sorted({item.get("LANGUAGE", "") for item in candidates if item.get("LANGUAGE")})
+        if available:
+            raise NativeEngineError(
+                f"Requested HLS subtitle language '{language}' is unavailable. "
+                f"Available languages: {', '.join(available)}."
+            )
+
+    return (
+        next((item for item in candidates if item.get("DEFAULT") == "YES"), None)
+        or next((item for item in candidates if item.get("AUTOSELECT") == "YES"), None)
+        or candidates[0]
+    )
+
+
+def _package_native_subtitles(output: Path, job_dir: Path, job_id: str) -> Path:
+    subtitles = sorted(job_dir.glob(f"nova-native-{job_id}.*.vtt"))
+    if not subtitles:
+        raise NativeEngineError("Subtitle extraction was requested, but no native WebVTT sidecar was produced.")
+    archive = job_dir / f"{output.stem}-with-subtitles.zip"
+    with ZipFile(archive, "w", compression=ZIP_DEFLATED, compresslevel=3) as bundle:
+        bundle.write(output, arcname=output.name)
+        for subtitle in subtitles:
+            bundle.write(subtitle, arcname=subtitle.name)
+    return archive
 def _choose_hls_variant(variants: list[dict], quality: str) -> dict:
     if not variants:
         raise NativeEngineError("The HLS master playlist contains no selectable video variants.")
