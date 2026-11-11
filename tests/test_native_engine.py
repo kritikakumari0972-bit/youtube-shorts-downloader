@@ -87,3 +87,22 @@ def test_dash_refuses_content_protection(tmp_path, monkeypatch):
                 client, "https://cdn.example/manifest.mpd", tmp_path, "job4",
                 lambda **kwargs: None
             )
+
+
+
+def test_html5_page_resolves_open_graph_video(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    html = b"""<html><head>
+      <title>My clip</title>
+      <meta property="og:video" content="/assets/clip.mp4">
+      <meta property="og:image" content="/assets/poster.jpg">
+    </head><body></body></html>"""
+    client = mock_client({"/watch/1": html})
+    monkeypatch.setattr(native_engine.httpx, "Client", lambda **kwargs: client)
+
+    result = native_engine.resolve_html5_media("https://site.example/watch/1")
+
+    assert result is not None
+    assert result["media_url"] == "https://site.example/assets/clip.mp4"
+    assert result["title"] == "My clip"
+    assert result["thumbnail"] == "https://site.example/assets/poster.jpg"
