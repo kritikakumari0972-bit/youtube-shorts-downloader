@@ -512,7 +512,7 @@ def _choose_dash_representation(representations: list, quality: str):
 def _dash_template_value(pattern: str, *, representation_id: str, bandwidth: int,
                          number: int | None = None, timestamp: int | None = None) -> str:
     marker = "\x00NOVA_DOLLAR\x00"
-    value = pattern.replace("$", marker)
+    value = pattern.replace("$$", marker)
 
     def replace(match):
         token, width = match.group(1), match.group(2)
