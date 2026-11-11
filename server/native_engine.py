@@ -345,7 +345,7 @@ def _write_resource(
         if offset < 0 or length <= 0:
             raise NativeEngineError("The requested media byte range is invalid.")
         end = offset + length - 1
-        extra_headers = {"Range": f"bytes={offset}-{end}"}
+        extra_headers = {"Range": f"bytes={offset}-{end}", "Accept-Encoding": "identity"}
         expected_length = length
 
     response, _ = _request_following_redirects(
