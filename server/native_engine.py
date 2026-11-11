@@ -912,14 +912,20 @@ def _mux_dash_tracks(video_track: Path, audio_track: Path, job_id: str) -> Path:
     suffixes = {video_track.suffix.lower(), audio_track.suffix.lower()}
     output_ext = ".webm" if suffixes == {".webm"} else ".mkv" if ".webm" in suffixes else ".mp4"
     output = video_track.parent / f"nova-native-{job_id}{output_ext}"
+    command = [
+        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video_track), "-i", str(audio_track),
+        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+    ]
+    if output_ext == ".mp4":
+        command.extend(["-movflags", "+faststart"])
+    elif output_ext == ".webm":
+        command.extend(["-f", "webm"])
+    else:
+        command.extend(["-f", "matroska"])
+    command.append(str(output))
     result = subprocess.run(
-        [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-         "-i", str(video_track), "-i", str(audio_track),
-         "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
-         *(["-f", "webm"] if output_ext == ".webm" else []),
-         *(["-f", "matroska"] if output_ext == ".mkv" else []),
-         "-movflags", "+faststart" if output_ext == ".mp4" else "+faststart", str(output)],
-        capture_output=True, text=True, timeout=900, check=False
+        command, capture_output=True, text=True, timeout=900, check=False
     )
     if result.returncode != 0 or not output.exists() or output.stat().st_size == 0:
         raise NativeEngineError(
