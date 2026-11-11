@@ -2,28 +2,20 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
-import zipfile
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin, urlsplit
-
-import httpx
 
 try:
     import yt_dlp
-except ImportError:  # Allows lightweight unit tests before dependencies are installed.
+except ImportError:  # Keep the native engine importable without the compatibility pack.
     yt_dlp = None  # type: ignore[assignment]
 
-from . import store
-from .security import safe_filename, validate_external_url
+from . import native_engine, store
+from .security import safe_filename
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).expanduser().resolve()
 DOWNLOAD_DIR = DATA_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-COBALT_API_URL = os.getenv("COBALT_API_URL", "").strip().rstrip("/")
-COBALT_API_KEY = os.getenv("COBALT_API_KEY", "").strip()
-MAX_DOWNLOAD_BYTES = int(float(os.getenv("MAX_DOWNLOAD_GB", "8")) * 1024**3)
 
 
 class DownloadCancelled(Exception):
@@ -32,15 +24,16 @@ class DownloadCancelled(Exception):
 
 def tool_status() -> dict[str, Any]:
     try:
-        version = yt_dlp.version.__version__ if yt_dlp is not None else "missing"
+        version = yt_dlp.version.__version__ if yt_dlp is not None else "not installed"
     except Exception:
-        version = "installed" if yt_dlp is not None else "missing"
+        version = "installed" if yt_dlp is not None else "not installed"
     return {
+        "native_engine": "NOVA Native v1",
         "yt_dlp": version,
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "javascript_runtime": bool(shutil.which("deno") or shutil.which("node") or shutil.which("bun")),
-        "cobalt_configured": bool(COBALT_API_URL),
+        "external_downloader_api": False,
     }
 
 
@@ -63,10 +56,22 @@ def _js_runtimes() -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _format_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return "Live / unknown length"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
 def extract_metadata(url: str) -> dict[str, Any]:
+    if native_engine.is_native_url(url):
+        return native_engine.preview(url)
     if yt_dlp is None:
-        raise RuntimeError("yt-dlp is not installed. Install requirements.txt or use Docker.")
-    safe_url = validate_external_url(url)
+        raise RuntimeError(
+            "This is a website page, not a direct media URL. Install the local site-extractor compatibility pack (yt-dlp) or use a direct HTTP/HLS/DASH media URL."
+        )
+
     options: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -78,7 +83,7 @@ def extract_metadata(url: str) -> dict[str, Any]:
         "js_runtimes": _js_runtimes(),
     }
     with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(safe_url, download=False)
+        info = downloader.extract_info(url, download=False)
 
     if info.get("_type") == "playlist" and info.get("entries"):
         info = next((entry for entry in info["entries"] if entry), info)
@@ -103,20 +108,12 @@ def extract_metadata(url: str) -> dict[str, Any]:
         "thumbnail": info.get("thumbnail"),
         "duration": duration,
         "duration_label": _format_duration(duration),
-        "source": info.get("extractor_key") or info.get("extractor") or "Supported source",
-        "webpage_url": info.get("webpage_url") or safe_url,
+        "source": info.get("extractor_key") or info.get("extractor") or "Local site extractor",
+        "webpage_url": info.get("webpage_url") or url,
         "formats": formats[:16],
         "is_live": bool(info.get("is_live")),
         "playlist_count": info.get("playlist_count"),
     }
-
-
-def _format_duration(seconds: int) -> str:
-    if seconds <= 0:
-        return "Live / unknown length"
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
 def _progress_hook(job_id: str, on_update: Callable[..., None]) -> Callable[[dict[str, Any]], None]:
@@ -136,11 +133,11 @@ def _progress_hook(job_id: str, on_update: Callable[..., None]) -> Callable[[dic
             )
         if event.get("status") != "downloading":
             return
+        import time
         now = time.monotonic()
         if now - last_update < 0.45:
             return
         last_update = now
-
         total = event.get("total_bytes") or event.get("total_bytes_estimate") or 0
         downloaded = event.get("downloaded_bytes") or 0
         percent = round(downloaded * 100 / total, 1) if total else 0
@@ -166,9 +163,32 @@ def _human_bytes(value: float | int) -> str:
     return f"{amount:.1f} GB"
 
 
+def _collect_output(job_dir: Path, job_id: str) -> Path:
+    allowed = {
+        ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".mp3", ".m4a",
+        ".opus", ".ogg", ".wav", ".flac", ".ts", ".gif", ".jpg", ".jpeg", ".png",
+    }
+    files = [
+        path for path in job_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in allowed and path.stat().st_size > 0
+    ]
+    if not files:
+        raise RuntimeError("The extractor finished but no downloadable media file was produced.")
+    files.sort(key=lambda path: path.stat().st_size, reverse=True)
+    if len(files) == 1:
+        return files[0]
+
+    import zipfile
+    archive = job_dir / f"nova-fetch-{job_id}.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as bundle:
+        for path in files:
+            bundle.write(path, arcname=path.name)
+    return archive
+
+
 def _download_with_ytdlp(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
     if yt_dlp is None:
-        raise RuntimeError("yt-dlp is not installed. Install requirements.txt or use Docker.")
+        raise RuntimeError("The local site-extractor compatibility pack is not installed.")
     job_dir = DOWNLOAD_DIR / job["id"]
     job_dir.mkdir(parents=True, exist_ok=True)
     options: dict[str, Any] = {
@@ -187,7 +207,6 @@ def _download_with_ytdlp(job: dict[str, Any], on_update: Callable[..., None]) ->
         "progress_hooks": [_progress_hook(job["id"], on_update)],
         "js_runtimes": _js_runtimes(),
         "overwrites": False,
-        "max_filesize": MAX_DOWNLOAD_BYTES,
     }
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
@@ -195,11 +214,8 @@ def _download_with_ytdlp(job: dict[str, Any], on_update: Callable[..., None]) ->
     if job["mode"] == "audio":
         options["format"] = "bestaudio/best"
         options["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": str(job.get("audio_bitrate", "192")),
-            }
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
+             "preferredquality": str(job.get("audio_bitrate", "192"))}
         ]
     else:
         options["merge_output_format"] = job.get("container", "mp4")
@@ -225,125 +241,36 @@ def _download_with_ytdlp(job: dict[str, Any], on_update: Callable[..., None]) ->
 
     options["postprocessor_hooks"] = [postprocessor_hook]
     with yt_dlp.YoutubeDL(options) as downloader:
-        downloader.download([validate_external_url(job["url"])])
-
+        downloader.download([job["url"]])
     return _collect_output(job_dir, job["id"])
-
-
-def _trusted_cobalt_hosts() -> set[str]:
-    if not COBALT_API_URL:
-        return set()
-    host = urlsplit(COBALT_API_URL).hostname
-    return {host} if host else set()
-
-
-def _download_with_cobalt(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
-    if not COBALT_API_URL:
-        raise RuntimeError("Cobalt is not configured. Set COBALT_API_URL to an instance you own or are allowed to use.")
-
-    payload: dict[str, Any] = {
-        "url": validate_external_url(job["url"]),
-        "downloadMode": "audio" if job["mode"] == "audio" else "auto",
-        "videoQuality": "max" if job["quality"] == "best" else job["quality"],
-        "youtubeVideoContainer": job.get("container", "mp4"),
-        "audioFormat": "mp3",
-        "audioBitrate": job.get("audio_bitrate", "192"),
-        "filenameStyle": "pretty",
-        "disableMetadata": not bool(job.get("embed_metadata")),
-    }
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    if COBALT_API_KEY:
-        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
-
-    with httpx.Client(timeout=45, follow_redirects=False) as client:
-        response = client.post(COBALT_API_URL + "/", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-
-        state = data.get("status")
-        if state in {"error", "picker", "local-processing"}:
-            code = (data.get("error") or {}).get("code") or state
-            raise RuntimeError(f"Cobalt returned '{code}'. This source may need a different provider or media picker flow.")
-        if state not in {"tunnel", "redirect"} or not data.get("url"):
-            raise RuntimeError("Cobalt returned an unsupported or incomplete response.")
-
-        job_dir = DOWNLOAD_DIR / job["id"]
-        job_dir.mkdir(parents=True, exist_ok=True)
-        filename = safe_filename(data.get("filename") or "cobalt-media")
-        suffix = ".mp3" if job["mode"] == "audio" else ".mp4"
-        target = job_dir / (filename if Path(filename).suffix else filename + suffix)
-        current_url = data["url"]
-        trusted_hosts = _trusted_cobalt_hosts()
-
-        for _ in range(6):
-            validate_external_url(current_url, trusted_hosts=trusted_hosts)
-            with client.stream("GET", current_url) as download_response:
-                if download_response.is_redirect:
-                    location = download_response.headers.get("location")
-                    if not location:
-                        raise RuntimeError("Cobalt returned an invalid download redirect.")
-                    current_url = urljoin(current_url, location)
-                    continue
-                download_response.raise_for_status()
-                total = int(download_response.headers.get("content-length") or 0)
-                received = 0
-                with target.open("wb") as output:
-                    for chunk in download_response.iter_bytes(chunk_size=1024 * 256):
-                        job_state = store.get_job(job["id"])
-                        if job_state and job_state.get("cancel_requested"):
-                            raise DownloadCancelled("Download cancelled by user.")
-                        received += len(chunk)
-                        if received > MAX_DOWNLOAD_BYTES:
-                            raise RuntimeError("Download exceeds the configured size limit.")
-                        output.write(chunk)
-                        percent = round(received * 100 / total, 1) if total else 0
-                        on_update(percent=min(percent, 99.5), downloaded_bytes=received, total_bytes=total)
-                if target.stat().st_size == 0:
-                    raise RuntimeError("The source returned an empty file.")
-                return target
-        raise RuntimeError("Too many redirects while retrieving the Cobalt file.")
-
-
-def _collect_output(job_dir: Path, job_id: str) -> Path:
-    allowed = {
-        ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".mp3", ".m4a",
-        ".opus", ".ogg", ".wav", ".flac", ".ts", ".gif", ".jpg", ".jpeg", ".png",
-    }
-    files = [
-        path for path in job_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in allowed and path.stat().st_size > 0
-    ]
-    if not files:
-        raise RuntimeError("The extractor finished but no downloadable media file was produced.")
-    files.sort(key=lambda path: path.stat().st_size, reverse=True)
-    if len(files) == 1:
-        return files[0]
-
-    archive = job_dir / f"nova-fetch-{job_id}.zip"
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as bundle:
-        for path in files:
-            bundle.write(path, arcname=path.name)
-    return archive
 
 
 def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Path:
     provider = job.get("provider", "auto")
-    if provider == "cobalt":
-        return _download_with_cobalt(job, on_update)
+    is_native = native_engine.is_native_url(job["url"])
+
+    if provider == "native":
+        if not is_native:
+            raise RuntimeError("The NOVA Native engine accepts direct media files and standard HLS/DASH manifest URLs. Choose Automatic for supported website pages.")
+        return native_engine.download(job, on_update)
+
     if provider == "yt-dlp":
         return _download_with_ytdlp(job, on_update)
 
-    try:
-        return _download_with_ytdlp(job, on_update)
-    except DownloadCancelled:
-        raise
-    except Exception as primary_error:
-        if not COBALT_API_URL:
-            raise RuntimeError(str(primary_error)[:500]) from primary_error
-        on_update(stage="Trying configured Cobalt instance", status="downloading")
+    # Automatic mode uses NOVA's own standards-based engine first.
+    # Website-page extractors are a local compatibility layer, not a hosted API.
+    if is_native:
         try:
-            return _download_with_cobalt(job, on_update)
-        except Exception as cobalt_error:
-            raise RuntimeError(
-                f"yt-dlp: {str(primary_error)[:220]} | Cobalt: {str(cobalt_error)[:220]}"
-            ) from cobalt_error
+            return native_engine.download(job, on_update)
+        except DownloadCancelled:
+            raise
+        except Exception as native_error:
+            on_update(stage="Native source needs compatibility extractor")
+            try:
+                return _download_with_ytdlp(job, on_update)
+            except Exception as extractor_error:
+                raise RuntimeError(
+                    f"NOVA Native: {str(native_error)[:220]} | Local extractor: {str(extractor_error)[:220]}"
+                ) from extractor_error
+
+    return _download_with_ytdlp(job, on_update)
