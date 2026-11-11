@@ -24,6 +24,7 @@ function displayTools(tools) {
     ["FFPROBE",tools.ffprobe?"READY":"MISSING",tools.ffprobe],
     ["JS RUNTIME",tools.javascript_runtime?"READY":"MISSING",tools.javascript_runtime],
     ["NOVA NATIVE",tools.native_engine||"BUILT-IN",true],
+    ["NOVA EXTRACTORS",(tools.extractors||[]).length+" LOCAL",true],
     ["EXTERNAL API",tools.external_downloader_api?"ENABLED":"DISABLED",!tools.external_downloader_api]
   ];
   $("engine-status").innerHTML=rows.map(([name,value,active])=>'<span class="tool '+(active?"":"off")+'"><i></i>'+esc(name)+" · "+esc(value)+"</span>").join("");
