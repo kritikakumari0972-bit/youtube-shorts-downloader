@@ -61,6 +61,6 @@ A separate audio/video DASH source requires local FFmpeg for the final stream-co
 
 ## Website compatibility
 
-NOVA Native only resolves public media exposed in the supported metadata and manifest formats. A site that requires JavaScript execution, account authentication, cookies, signed private endpoints or a site-specific extraction flow may need the optional local compatibility component. That component runs in the same NOVA FETCH installation and remains third-party software under its own license.
+NOVA Native only resolves public media exposed in the supported metadata and manifest formats. Native subtitles are limited to static HLS master playlists declaring plain WebVTT renditions. The selected subtitle language is normalized using each segment's X-TIMESTAMP-MAP, including MPEGTS 33-bit rollover, and returned in a ZIP containing the media and VTT sidecar. Direct-media subtitles, fragmented-MP4 subtitle tracks and DASH subtitles remain outside the native subset. A site that requires JavaScript execution, account authentication, cookies, signed private endpoints or a site-specific extraction flow may need the optional local compatibility component. That component runs in the same NOVA FETCH installation and remains third-party software under its own license.
 
 NOVA FETCH does not bypass DRM, paywalls, private-account restrictions or other access controls. Only download media that you own or have permission to save.
