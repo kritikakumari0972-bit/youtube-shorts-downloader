@@ -93,7 +93,7 @@ async def worker():
 
             try:
                 output = await asyncio.to_thread(engines.perform_download, job, update)
-                if job.get("subtitles") and job.get("provider") != "cobalt":
+                if job.get("subtitles") and job.get("provider") != "native":
                     output = await asyncio.to_thread(package_subtitles, output, FILES / jid)
                 current = store.get_job(jid) or {}
                 if current.get("cancel_requested"):
