@@ -400,3 +400,103 @@ def test_dash_muxer_chooses_compatible_container(
         assert "-movflags" in command_seen["value"]
     else:
         assert command_seen["value"][-3:-1] == ["-f", expected_muxer]
+
+
+def test_webvtt_segments_apply_timestamp_maps_and_merge_cues():
+    first = (
+        b"WEBVTT\n"
+        b"X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:945000\n\n"
+        b"00:00:00.000 --> 00:00:00.500\nFirst caption\n"
+    )
+    second = (
+        b"WEBVTT\n"
+        b"X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:1800000\n\n"
+        b"00:00:00.000 --> 00:00:00.500\nSecond caption\n"
+    )
+
+    result = native_engine._merge_webvtt_segments([first, second])
+
+    assert "00:00:10.500 --> 00:00:11.000" in result
+    assert "First caption" in result
+    assert "00:00:20.000 --> 00:00:20.500" in result
+    assert "Second caption" in result
+
+
+def test_hls_master_downloads_declared_webvtt_subtitle_rendition(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360,SUBTITLES="subs"
+video.m3u8
+"""
+    video_playlist = b"#EXTM3U\n#EXTINF:2,\nvideo.ts\n#EXT-X-ENDLIST\n"
+    subtitle_playlist = b"#EXTM3U\n#EXTINF:2,\nfirst.vtt\n#EXTINF:2,\nsecond.vtt\n#EXT-X-ENDLIST\n"
+    first_vtt = (
+        b"WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:945000\n\n"
+        b"00:00:00.000 --> 00:00:00.500\nHello\n"
+    )
+    second_vtt = (
+        b"WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:1800000\n\n"
+        b"00:00:00.000 --> 00:00:00.500\nWorld\n"
+    )
+    routes = {
+        "/master.m3u8": master,
+        "/video.m3u8": video_playlist,
+        "/video.ts": b"VIDEO",
+        "/en.m3u8": subtitle_playlist,
+        "/first.vtt": first_vtt,
+        "/second.vtt": second_vtt,
+    }
+    with mock_client(routes) as client:
+        output = native_engine._download_hls(
+            client, "https://cdn.example/master.m3u8", tmp_path, "subtitle-job",
+            lambda **kwargs: None, subtitles=True, subtitle_lang="en"
+        )
+
+    sidecar = tmp_path / "nova-native-subtitle-job.en.vtt"
+    assert output.read_bytes() == b"VIDEO"
+    assert sidecar.exists()
+    parsed = sidecar.read_text(encoding="utf-8")
+    assert "00:00:10.500 --> 00:00:11.000" in parsed
+    assert "Hello" in parsed
+    assert "00:00:20.000 --> 00:00:20.500" in parsed
+    assert "World" in parsed
+
+
+def test_hls_subtitle_language_selection_reports_missing_language():
+    renditions = [
+        {"TYPE": "SUBTITLES", "GROUP-ID": "captions", "LANGUAGE": "en", "URI": "en.m3u8"},
+        {"TYPE": "SUBTITLES", "GROUP-ID": "captions", "LANGUAGE": "hi", "URI": "hi.m3u8"},
+    ]
+    selected = native_engine._choose_hls_subtitle_rendition(renditions, "captions", "hi")
+    assert selected["URI"] == "hi.m3u8"
+
+    with pytest.raises(native_engine.NativeEngineError, match="Available languages"):
+        native_engine._choose_hls_subtitle_rendition(renditions, "captions", "fr")
+
+
+def test_native_subtitle_packaging_returns_media_and_vtt_archive(tmp_path):
+    import zipfile
+
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"MEDIA")
+    sidecar = tmp_path / "nova-native-pack-job.en.vtt"
+    sidecar.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n", encoding="utf-8")
+
+    archive = native_engine._package_native_subtitles(media, tmp_path, "pack-job")
+
+    with zipfile.ZipFile(archive) as bundle:
+        assert set(bundle.namelist()) == {media.name, sidecar.name}
+        assert bundle.read(media.name) == b"MEDIA"
+        assert b"Caption" in bundle.read(sidecar.name)
+
+
+def test_hls_native_subtitles_require_master_playlist(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_engine, "validate_external_url", lambda value: value)
+    media = b"#EXTM3U\n#EXTINF:2,\nvideo.ts\n#EXT-X-ENDLIST\n"
+    with mock_client({"/direct.m3u8": media, "/video.ts": b"VIDEO"}) as client:
+        with pytest.raises(native_engine.NativeEngineError, match="master playlist"):
+            native_engine._download_hls(
+                client, "https://cdn.example/direct.m3u8", tmp_path, "no-subs",
+                lambda **kwargs: None, subtitles=True
+            )
