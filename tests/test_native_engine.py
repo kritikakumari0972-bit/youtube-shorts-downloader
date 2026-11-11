@@ -191,6 +191,7 @@ blob.bin
     def handler(request):
         if request.url.path == "/list.m3u8":
             return httpx.Response(200, content=manifest, request=request)
+        assert request.headers.get("accept-encoding") == "identity"
         value = request.headers.get("range", "")
         match = __import__("re").fullmatch(r"bytes=(\d+)-(\d+)", value)
         if not match:
