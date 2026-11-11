@@ -23,6 +23,7 @@ DOWNLOAD_DIR = DATA_DIR / "downloads"
 MAX_BYTES = int(float(os.getenv("MAX_DOWNLOAD_GB", "8")) * 1024**3)
 MAX_MANIFEST_BYTES = 3 * 1024 * 1024
 MAX_SEGMENTS = 20_000
+MAX_SUBTITLE_BYTES = 64 * 1024 * 1024
 MAX_REDIRECTS = 5
 MAX_REQUEST_RETRIES = 2
 HEADERS = {"User-Agent": "NOVA-FETCH/1.0 (self-hosted media client)", "Accept": "*/*"}
@@ -520,27 +521,27 @@ def _merge_webvtt_segments(payloads: list[bytes]) -> str:
     """Normalize HLS WebVTT timestamp maps and join cue blocks into one VTT file."""
     cue_blocks: list[str] = []
     cue_pattern = re.compile(
-        r"^(\\d{2,}:\\d{2}(?::\\d{2})?\\.\\d{3})\\s+-->\\s+"
-        r"(\\d{2,}:\\d{2}(?::\\d{2})?\\.\\d{3})(.*)$"
+        r"^(\d{2,}:\d{2}(?::\d{2})?\.\d{3})\s+-->\s+"
+        r"(\d{2,}:\d{2}(?::\d{2})?\.\d{3})(.*)$"
     )
 
     for payload in payloads:
         try:
-            content = payload.decode("utf-8-sig").replace("\\r\\n", "\\n").replace("\\r", "\\n")
+            content = payload.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
         except UnicodeDecodeError as exc:
             raise NativeEngineError("An HLS subtitle segment is not valid UTF-8 WebVTT.") from exc
-        lines = content.split("\\n")
+        lines = content.split("\n")
         if not lines or not lines[0].lstrip().startswith("WEBVTT"):
             raise NativeEngineError(
                 "The selected HLS subtitle rendition is not plain WebVTT. Fragmented MP4/other subtitle formats are not supported."
             )
 
         separator = next((index for index, line in enumerate(lines) if not line.strip()), None)
-        header = "\\n".join(lines[:separator]) if separator is not None else lines[0]
+        header = "\n".join(lines[:separator]) if separator is not None else lines[0]
         body = lines[separator + 1:] if separator is not None else lines[1:]
         shift_ms = 0
         mapping = re.search(
-            r"X-TIMESTAMP-MAP\\s*=\\s*LOCAL:([^,\\s]+)\\s*,\\s*MPEGTS:(\\d+)",
+            r"X-TIMESTAMP-MAP\s*=\s*LOCAL:([^,\s]+)\s*,\s*MPEGTS:(\d+)",
             header,
             re.I,
         )
@@ -549,10 +550,10 @@ def _merge_webvtt_segments(payloads: list[bytes]) -> str:
             mpeg_ticks = int(mapping.group(2))
             shift_ms = round(mpeg_ticks * 1000 / 90_000) - local_ms
 
-        body_text = "\\n".join(body).strip()
+        body_text = "\n".join(body).strip()
         if not body_text:
             continue
-        for block in re.split(r"\\n\\s*\\n", body_text):
+        for block in re.split(r"\n\s*\n", body_text):
             block_lines = block.splitlines()
             changed = False
             for index, line in enumerate(block_lines):
@@ -567,12 +568,11 @@ def _merge_webvtt_segments(payloads: list[bytes]) -> str:
                 )
                 changed = True
             if changed or block.strip().startswith(("NOTE", "STYLE", "REGION")):
-                cue_blocks.append("\\n".join(block_lines))
+                cue_blocks.append("\n".join(block_lines))
 
     if not cue_blocks:
         raise NativeEngineError("The selected HLS subtitle rendition contained no readable WebVTT cues.")
-    return "WEBVTT\\n\\n" + "\\n\\n".join(cue_blocks).strip() + "\\n"
-
+    return "WEBVTT\n\n" + "\n\n".join(cue_blocks).strip() + "\n"
 
 def _download_hls_subtitle_playlist(
     client: httpx.Client,
