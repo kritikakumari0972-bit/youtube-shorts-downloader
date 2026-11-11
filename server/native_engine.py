@@ -771,12 +771,12 @@ def _write_dash_template(
         resources.append(urljoin(base_url, init_name))
     resources.extend(urljoin(base_url, name) for name in segment_names)
     if state is None:
-        with target.open("wb") as output:
+        state = {"total": 0}
+    with target.open("wb") as output:
         for index, resource in enumerate(resources, start=1):
             _write_resource(client, resource, output, on_update, state)
             on_update(stage=f"NOVA Native · DASH segment {index}/{len(resources)}")
     return target
-
 
 def _dash_adaptation_kind(adaptation) -> str:
     """Identify audio/video/text adaptations using public MPD metadata."""
