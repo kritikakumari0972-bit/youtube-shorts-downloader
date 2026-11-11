@@ -83,3 +83,25 @@ def test_dash_template_rejects_unbounded_negative_repeat():
         native_engine._dash_template_segments(
             template, timeline, period_duration=0, representation_id="v1", bandwidth=1000
         )
+
+
+def test_dash_template_expands_escaped_dollar_literal():
+    result = native_engine._dash_template_value(
+        "captions-$$-$Number%04d$.m4s",
+        representation_id="v1",
+        bandwidth=1200,
+        number=7,
+        timestamp=14,
+    )
+    assert result == "captions-$-0007.m4s"
+
+
+def test_dash_template_rejects_unknown_variables():
+    with pytest.raises(native_engine.NativeEngineError, match="unsupported variable"):
+        native_engine._dash_template_value(
+            "chunk-$Unknown$.m4s",
+            representation_id="v1",
+            bandwidth=1200,
+            number=1,
+            timestamp=0,
+        )
