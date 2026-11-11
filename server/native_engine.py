@@ -338,6 +338,7 @@ def _write_resource(
     state: dict,
     total_hint: int = 0,
     byte_range: tuple[int, int] | None = None,
+    max_resource_bytes: int | None = None,
 ):
     """Stream a media resource, optionally requiring one exact HTTP byte range."""
     extra_headers = None
@@ -374,6 +375,8 @@ def _write_resource(
                 raise NativeEngineError("The download exceeds MAX_DOWNLOAD_GB.")
             if expected_length is not None and written > expected_length:
                 raise NativeEngineError("The source returned more bytes than the requested HLS range.")
+            if max_resource_bytes is not None and written > max_resource_bytes:
+                raise NativeEngineError("An HLS subtitle segment exceeds the native subtitle size limit.")
             output.write(chunk)
             total = total_hint or expected_length or int(response.headers.get("content-length") or 0)
             percent = round(min(99.5, state["total"] * 100 / total), 1) if total else 0
@@ -625,8 +628,13 @@ def _download_hls_subtitle_playlist(
         try:
             with part.open("wb") as output:
                 _write_resource(
-                    client, resource, output, on_update, state, byte_range=byte_range
+                    client, resource, output, on_update, state,
+                    byte_range=byte_range, max_resource_bytes=MAX_SUBTITLE_BYTES
                 )
+            part_size = part.stat().st_size
+            current_size = sum(len(item) for item in payloads)
+            if current_size + part_size > MAX_SUBTITLE_BYTES:
+                raise NativeEngineError("The HLS subtitle track exceeds the 64 MiB native subtitle limit.")
             payloads.append(part.read_bytes())
         finally:
             part.unlink(missing_ok=True)
@@ -724,6 +732,8 @@ def _download_hls(
     job_id: str,
     on_update,
     quality: str = "best",
+    subtitles: bool = False,
+    subtitle_lang: str = "en",
 ) -> Path:
     text, final_url = _read_manifest(client, url)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -732,11 +742,14 @@ def _download_hls(
 
     variants = []
     audio_renditions = []
+    subtitle_renditions = []
     for index, line in enumerate(lines):
         if line.startswith("#EXT-X-MEDIA:"):
             attrs = _parse_hls_attrs(line.split(":", 1)[1])
             if attrs.get("TYPE") == "AUDIO":
                 audio_renditions.append(attrs)
+            elif attrs.get("TYPE") == "SUBTITLES":
+                subtitle_renditions.append(attrs)
         elif line.startswith("#EXT-X-STREAM-INF:"):
             attrs = _parse_hls_attrs(line.split(":", 1)[1])
             next_uri = next((item for item in lines[index + 1:] if not item.startswith("#")), None)
@@ -752,36 +765,54 @@ def _download_hls(
                 "height": height,
                 "url": urljoin(final_url, next_uri),
                 "audio_group": attrs.get("AUDIO"),
+                "subtitle_group": attrs.get("SUBTITLES"),
             })
 
-    if variants:
-        selected = _choose_hls_variant(variants, quality)
-        video_path = job_dir / f"nova-native-{job_id}-video.ts"
-        state = {"total": 0}
-        _download_hls_media_playlist(client, selected["url"], video_path, on_update, state)
+    if not variants:
+        if subtitles:
+            raise NativeEngineError(
+                "NOVA Native subtitles require an HLS master playlist that declares a plain WebVTT subtitle rendition."
+            )
+        # A media playlist (rather than a master playlist).
+        extension = ".mp4" if any(line.startswith("#EXT-X-MAP:") for line in lines) else ".ts"
+        target = job_dir / f"nova-native-{job_id}{extension}"
+        return _download_hls_media_playlist(client, url, target, on_update, {"total": 0})
 
-        group = selected.get("audio_group")
-        rendition_candidates = [
-            item for item in audio_renditions
-            if group and item.get("GROUP-ID") == group and item.get("URI")
-        ]
-        if rendition_candidates:
-            rendition = next((item for item in rendition_candidates if item.get("DEFAULT") == "YES"), None)
-            if rendition is None:
-                rendition = next((item for item in rendition_candidates if item.get("AUTOSELECT") == "YES"), None)
-            if rendition is None:
-                rendition = rendition_candidates[0]
-            audio_url = urljoin(final_url, rendition["URI"])
-            audio_path = job_dir / f"nova-native-{job_id}-audio.ts"
-            _download_hls_media_playlist(client, audio_url, audio_path, on_update, state)
-            return _mux_hls_tracks(video_path, audio_path, job_id)
-        return video_path
+    selected = _choose_hls_variant(variants, quality)
+    video_path = job_dir / f"nova-native-{job_id}-video.ts"
+    state = {"total": 0}
+    _download_hls_media_playlist(client, selected["url"], video_path, on_update, state)
 
-    # A media playlist (rather than a master playlist).
-    extension = ".mp4" if any(line.startswith("#EXT-X-MAP:") for line in lines) else ".ts"
-    target = job_dir / f"nova-native-{job_id}{extension}"
-    return _download_hls_media_playlist(client, url, target, on_update, {"total": 0})
+    output = video_path
+    group = selected.get("audio_group")
+    rendition_candidates = [
+        item for item in audio_renditions
+        if group and item.get("GROUP-ID") == group and item.get("URI")
+    ]
+    if rendition_candidates:
+        rendition = next((item for item in rendition_candidates if item.get("DEFAULT") == "YES"), None)
+        if rendition is None:
+            rendition = next((item for item in rendition_candidates if item.get("AUTOSELECT") == "YES"), None)
+        if rendition is None:
+            rendition = rendition_candidates[0]
+        audio_url = urljoin(final_url, rendition["URI"])
+        audio_path = job_dir / f"nova-native-{job_id}-audio.ts"
+        _download_hls_media_playlist(client, audio_url, audio_path, on_update, state)
+        output = _mux_hls_tracks(video_path, audio_path, job_id)
 
+    if subtitles:
+        rendition = _choose_hls_subtitle_rendition(
+            subtitle_renditions, selected.get("subtitle_group"), subtitle_lang
+        )
+        language = re.sub(r"[^A-Za-z0-9_-]", "", rendition.get("LANGUAGE") or subtitle_lang or "und")
+        language = language[:16] or "und"
+        subtitle_path = job_dir / f"nova-native-{job_id}.{language}.vtt"
+        _download_hls_subtitle_playlist(
+            client, urljoin(final_url, rendition["URI"]), subtitle_path,
+            job_id, on_update, state
+        )
+
+    return output
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
@@ -1237,10 +1268,19 @@ def download(job: dict, on_update) -> Path:
     with httpx.Client(timeout=httpx.Timeout(60, connect=20), follow_redirects=False) as client:
         path = urlsplit(url).path.lower()
         if path.endswith(".m3u8"):
-            output = _download_hls(client, url, job_dir, job["id"], on_update, quality=job.get("quality", "best"))
+            output = _download_hls(
+                client, url, job_dir, job["id"], on_update,
+                quality=job.get("quality", "best"),
+                subtitles=bool(job.get("subtitles")),
+                subtitle_lang=job.get("subtitle_lang", "en"),
+            )
         elif path.endswith(".mpd"):
+            if job.get("subtitles"):
+                raise NativeEngineError("Native DASH subtitle extraction is not supported yet. Use Automatic or the local site-extractor pack for DASH subtitles.")
             output = _download_dash(client, url, job_dir, job["id"], on_update, quality=job.get("quality", "best"))
         else:
+            if job.get("subtitles"):
+                raise NativeEngineError("Native subtitles are currently supported only for HLS master playlists with declared WebVTT renditions.")
             response, final_url = _request_following_redirects(client, url, stream=True)
             try:
                 length = int(response.headers.get("content-length") or 0)
@@ -1269,4 +1309,6 @@ def download(job: dict, on_update) -> Path:
         raise NativeEngineError("The source returned an empty file.")
     if job.get("mode") == "audio":
         output = _extract_mp3(output, job)
+    if job.get("subtitles"):
+        output = _package_native_subtitles(output, job_dir, job["id"])
     return output
