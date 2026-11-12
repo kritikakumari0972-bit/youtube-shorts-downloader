@@ -22,7 +22,7 @@ NOVA FETCH does not bypass DRM, paywalls, private accounts, login gates, or othe
 - Responsive web dashboard for desktop and mobile browsers
 - Paste up to 10 source links in one batch
 - Metadata preview for supported sources
-- First-party public PeerTube adapter (HLS preferred; progressive-file fallback when HLS is disabled)
+- First-party public PeerTube adapter (HLS preferred; quality-aware progressive fallback when HLS is disabled)
 - Native direct-file downloads
 - Native static HLS with quality selection, separate audio renditions, initialization maps and HTTP byte-range support
 - Native HLS WebVTT subtitles with language selection, timestamp-map normalization and media-plus-subtitle ZIP output
