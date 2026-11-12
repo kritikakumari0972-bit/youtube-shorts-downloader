@@ -73,6 +73,7 @@ Each adapter must provide:
 - `priority`: integer; higher priority runs first.
 - `supports(url)`: fast predicate that should not perform network requests.
 - `extract(url)`: return a dictionary containing `media_url`; optional metadata fields are `title`, `creator`, `thumbnail`, and `source`. Return `None` when the adapter cannot resolve the source.
+- Optional `extract_for_job(url, context)`: contextual extraction for download preferences. `context` is the validated download-job options dictionary and can contain `quality`, `mode`, and other request settings. The registry calls this method only for download jobs; metadata previews continue to call `extract(url)`.
 
 The returned media URL is validated again by NOVA Native before it is fetched. The current registry isolates a plugin exception and continues to the next adapter.
 
