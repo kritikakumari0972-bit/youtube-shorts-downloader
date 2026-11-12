@@ -32,6 +32,7 @@ def tool_status() -> dict[str, Any]:
     return {
         "native_engine": "NOVA Native v1.4 · HLS WebVTT Core",
         "extractors": registry.names(),
+        "extractor_diagnostics": registry.diagnostics(),
         "yt_dlp": version,
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
