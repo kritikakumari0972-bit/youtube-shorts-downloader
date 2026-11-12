@@ -272,7 +272,7 @@ def perform_download(job: dict[str, Any], on_update: Callable[..., None]) -> Pat
         # subtitle coverage. Native mode supports declared static HLS WebVTT.
         return _download_with_ytdlp(job, on_update)
 
-    match = get_registry().extract(job["url"])
+    match = get_registry().extract(job["url"], context=job)
     if provider == "native":
         if not match:
             raise RuntimeError(
