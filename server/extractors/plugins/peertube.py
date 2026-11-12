@@ -26,6 +26,14 @@ def _video_id(url: str) -> str | None:
     return None
 
 
+def _duration_label(seconds: int) -> str:
+    if seconds <= 0:
+        return "Length not exposed by this source"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
 def _positive_int(value: Any) -> int:
     try:
         number = int(value or 0)
@@ -239,9 +247,7 @@ class PeerTubeExtractor:
                 "creator": str(creator)[:160],
                 "thumbnail": _thumbnail(payload, url),
                 "duration": duration_value,
-                "duration_label": native_engine._format_iso_duration_label(duration_value)
-                if hasattr(native_engine, "_format_iso_duration_label")
-                else metadata.get("duration_label", "Length not exposed by this source"),
+                "duration_label": _duration_label(duration_value),
                 "formats": _format_entries(payload) or metadata.get("formats", []),
                 "source": "PeerTube · public instance API",
                 "webpage_url": url,
