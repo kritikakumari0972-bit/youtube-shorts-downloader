@@ -1,202 +1,155 @@
-# 🎥 YouTube Shorts & Videos Downloader
+# NOVA FETCH
 
-A powerful, fully-featured YouTube video and Shorts downloader built with **Next.js** and **ytdl-core**. Download videos in multiple quality options, extract audio as MP3, and download high-resolution thumbnails.
+**A self-hosted media downloader with a built-in native engine.**
 
-## ✨ Features
+NOVA FETCH is being developed as its own product and codebase. It does not call a public downloader website or a Cobalt-hosted API. Downloads run on the machine/container that runs NOVA FETCH.
 
-- ✅ **Video Preview** - See metadata before downloading (title, duration, views, channel)
-- ✅ **Multiple Quality Options** - Download in 144p to 4K resolution
-- ✅ **Video Download** - Get MP4 files in your preferred quality
-- ✅ **Audio Extraction** - Extract audio as MP3 format
-- ✅ **Thumbnail Download** - Save high-resolution video thumbnails
-- ✅ **Fast & Reliable** - Direct streaming without compression
-- ✅ **No Registration** - Completely free, no signup required
-- ✅ **Vercel Ready** - Deploy instantly to Vercel
-- ✅ **Responsive Design** - Works on desktop, tablet, and mobile
+The project has two layers:
 
-## 🚀 Quick Start
+1. **NOVA Native** — first-party code in this repository for direct HTTP media files, public PeerTube REST API and HTML5/Open Graph/JSON-LD discovery, static unencrypted HLS with quality selection, separate audio rendition muxing, HTTP byte-range segments and declared WebVTT subtitle extraction, DASH SegmentList and SegmentTemplate with separate audio/video adaptation muxing, bounded request retries, download queue/history, and local MP3 conversion through FFmpeg.
+2. **Local site-extractor compatibility pack** — yt-dlp runs as a local Python library inside the same application process. It is not a remote API, but it is third-party source code and remains separately licensed. It expands website coverage when a website has a maintained extractor.
 
-### Prerequisites
-- Node.js 18+ installed
-- npm or yarn package manager
+## Important compatibility boundary
 
-### Local Development
+No downloader can honestly guarantee every website or mobile app. Different sites use different page formats, signed requests, short-lived URLs, authentication systems and media protocols. Site integrations must be created and maintained one by one. NOVA Native currently supports direct media URLs, public PeerTube pages resolved through their instance's public REST API, public HTML5 pages that expose direct media in HTML/Open Graph/JSON-LD metadata, static unencrypted HLS playlists (including quality selection, separately declared audio renditions, initialization maps and explicit or implicit byte ranges). For HLS master playlists that declare a plain WebVTT subtitle rendition, NOVA can select a subtitle language, normalize WebVTT timestamp maps and package the subtitle sidecar with the media file. One-period static DASH manifests use SegmentList, SegmentTemplate/SegmentTimeline, or a direct BaseURL. When DASH audio and video are split into separate AdaptationSets, NOVA selects the requested video quality and a compatible audio representation, downloads both tracks and muxes them locally with FFmpeg. Live media, encrypted streams, DASH SegmentBase, multi-Period DASH and native DASH subtitles are not implemented. Native HLS subtitles do not currently support fragmented-MP4 subtitle tracks or direct media playlists.
+
+Automatic mode uses NOVA Native first for direct media/manifest URLs and public HTML5 pages with a directly exposed media source, then the local compatibility extractor when appropriate. It does not execute the page's JavaScript or use browser cookies. For pages requiring custom site-specific logic, it uses the locally installed compatibility extractor. No outside downloader service is required.
+
+NOVA FETCH does not bypass DRM, paywalls, private accounts, login gates, or other access controls. Use it only for media you own or have permission to save.
+
+## Features
+
+- Responsive web dashboard for desktop and mobile browsers
+- Paste up to 10 source links in one batch
+- Metadata preview for supported sources
+- First-party public PeerTube adapter (HLS preferred; quality-aware progressive fallback when HLS is disabled)
+- Native direct-file downloads
+- Native static HLS with quality selection, separate audio renditions, initialization maps and HTTP byte-range support
+- Native HLS WebVTT subtitles with language selection, timestamp-map normalization and media-plus-subtitle ZIP output
+- Native DASH SegmentList, SegmentTemplate and SegmentTimeline downloads
+- Separate DASH audio/video adaptation selection and local FFmpeg muxing
+- Bounded retry handling for temporary network and server errors
+- Local MP3 conversion with FFmpeg
+- Optional local website extractor pack for supported public sources
+- Quality selection, playlists and subtitle export through the compatibility pack
+- Progress, cancellation, download history and file retrieval
+- Safe extractor diagnostics exposed by the configuration API
+- SQLite job store and persistent Docker volume
+- API-key protection, URL validation, queue limits and download-size limits
+
+## Quick start — Docker
+
+Requirements: Docker Engine and Docker Compose.
 
 ```bash
-# Clone or setup the project
 git clone https://github.com/kritikakumari0972-bit/youtube-shorts-downloader.git
 cd youtube-shorts-downloader
-
-# Install dependencies
-npm install
-
-# Run development server
-npm run dev
+git checkout nova-fetch-v1
+cp .env.example .env
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
-
-### Production Build
+Create a strong local API key and put it in `.env` as `APP_API_KEY=...`:
 
 ```bash
-# Build for production
-npm run build
-
-# Start production server
-npm start
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-## 📦 Deployment to Vercel
-
-### Method 1: Direct Vercel Deploy (Recommended)
-
-1. Push your code to GitHub
-2. Go to [Vercel](https://vercel.com/)
-3. Click "New Project"
-4. Import your GitHub repository
-5. Click "Deploy"
-
-### Method 2: Using Vercel CLI
+Build and start:
 
 ```bash
-# Install Vercel CLI
-npm install -g vercel
-
-# Deploy
-vercel
+docker compose up -d --build
 ```
 
-## 🎯 How to Use
+Open **http://127.0.0.1:8080**, choose Settings and paste the same API key.
 
-1. **Paste YouTube URL** - Copy and paste any YouTube video or Shorts URL
-2. **Click Preview** - Instantly see video metadata and available qualities
-3. **Select Quality** - Choose your preferred download resolution (144p - 4K)
-4. **Download** - Select download type:
-   - 🎥 **Video** - Get MP4 in your chosen quality
-   - 🎵 **Audio** - Extract audio as MP3
-   - 🖼️ **Thumbnail** - Save high-res thumbnail image
+The Docker Compose port is bound to localhost by default. Do not expose the service to the public internet without HTTPS, authentication, an appropriately configured reverse proxy and network-level egress controls.
 
-## 🛠️ Technology Stack
+```bash
+docker compose logs -f nova-fetch
+docker compose down
+```
 
-- **Frontend**: Next.js 14 + React 18
-- **Styling**: CSS Modules
-- **Backend**: Next.js API Routes (Node.js)
-- **YouTube**: ytdl-core library
-- **Hosting**: Vercel
+## Local development
 
-## 📋 API Endpoints
+Requirements: Python 3.12+, FFmpeg/FFprobe and Node.js or Deno if you enable the website compatibility pack.
 
-### GET `/api/preview`
-Fetch video metadata and available formats
+```bash
+python -m venv .venv
+# Linux/macOS: source .venv/bin/activate
+# Windows PowerShell: .venv\\Scripts\\Activate.ps1
+pip install -r requirements-dev.txt
+uvicorn server.main:app --reload --host 127.0.0.1 --port 8080
+```
 
-**Parameters:**
-- `url` (string, required) - YouTube video URL
+Set the variables in `.env.example` in your shell before starting. Open **http://127.0.0.1:8080**.
 
-**Response:**
+## Engine selection
+
+- **Automatic · NOVA first** — use NOVA Native for direct media/HLS/DASH links; use the local compatibility pack for supported website pages.
+- **NOVA Native only** — first-party native engine and registered first-party adapters only. It accepts direct media files, public PeerTube pages, exposed HTML5 media, and the supported HLS/DASH subset. Subtitle extraction is limited to static HLS master playlists with declared plain WebVTT renditions; DASH/direct-file subtitles use the local compatibility pack in Automatic mode.
+- **Local site-extractor pack** — use the local yt-dlp compatibility component for its supported extractors.
+
+The optional extractor component is installed in the same container. It does not send a request to a third-party downloader service. It does request the original media site and media CDN, as any downloader must.
+
+## API routes
+
+When `APP_API_KEY` is set, send the key in the `X-API-Key` header.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Health check |
+| GET | `/api/config` | Native engine, extractor list, safe recent adapter diagnostics and local tool status |
+| GET | `/api/preview?url=...` | Metadata or direct-source summary |
+| POST | `/api/downloads` | Queue a download |
+| GET | `/api/downloads` | Recent job history |
+| GET | `/api/downloads/{id}` | Job state |
+| POST | `/api/downloads/{id}/cancel` | Request cancellation |
+| GET | `/api/downloads/{id}/file` | Download completed output |
+| DELETE | `/api/downloads/{id}` | Remove a finished job and its files |
+| GET | `/api/docs` | Interactive API documentation |
+
+Example request body:
+
 ```json
 {
-  "title": "Video Title",
-  "author": "Channel Name",
-  "thumbnail": "https://...",
-  "duration": 3600,
-  "durationFormatted": "1:00:00",
-  "views": 1000000,
-  "formats": [
-    { "qualityLabel": "1080p", "mimeType": "video/mp4" }
-  ]
+  "url": "https://media.example/public-video.m3u8",
+  "mode": "video",
+  "quality": "best",
+  "container": "mp4",
+  "provider": "native",
+  "playlist": false,
+  "subtitles": false,
+  "embed_metadata": true,
+  "embed_thumbnail": false,
+  "rights_confirmed": true
 }
 ```
 
-### GET `/api/download`
-Download video, audio, or thumbnail
+Provider values: `auto`, `native`, `yt-dlp`.
 
-**Parameters:**
-- `url` (string, required) - YouTube video URL
-- `format` (string) - 'video', 'audio' (default: 'video')
-- `quality` (string) - '144', '360', '480', '720', '1080', 'best' (default: 'best')
+## Configuration
 
-**Response:**
-- Binary file stream (MP4, MP3, etc.)
+| Variable | Default | Purpose |
+|---|---:|---|
+| `APP_API_KEY` | empty | Protect all `/api/*` routes. Set a strong value. |
+| `NOVA_FETCH_PORT` | `8080` | Docker host port. |
+| `MAX_ACTIVE_JOBS` | `2` | Number of queue workers. |
+| `MAX_QUEUED_JOBS` | `12` | Maximum active/queued jobs. |
+| `MAX_DOWNLOAD_GB` | `8` | Per-file download cap. |
+| `DATA_DIR` | local / `/data` in Docker | SQLite database and media directory. |\n| `NOVA_EXTRACTOR_MODULES` | empty | Comma-separated Python module import paths, each exposing `register(registry)`. |
 
-## ⚙️ Configuration
+## Tests
 
-### Environment Variables
-Create a `.env.local` file (if needed):
-
-```env
-# No env variables required for basic functionality
-# Add your own if needed for analytics, etc.
+```bash
+pip install -r requirements-dev.txt
+python -m compileall -q server tests
+python -m pytest -q
 ```
 
-## 🐛 Troubleshooting
+GitHub Actions runs Python tests and builds the Docker image.
 
-### "Invalid YouTube URL"
-- Ensure the URL is a valid YouTube video or Shorts link
-- Try copying directly from your browser address bar
+## Code ownership and third-party software
 
-### "Video unavailable"
-- Video may be private, deleted, or region-restricted
-- Check if the video is accessible in your region
+NOVA FETCH's first-party UI, API, security, job management and native-engine code is maintained in this repository. Third-party source remains owned by its respective authors and must retain its applicable notices and license. You may modify and distribute code where its license permits; that does not transfer ownership of the upstream code or remove its license conditions.
 
-### Download hangs or times out
-- Very long videos may take time
-- Try selecting a lower quality option
-- Check your internet connection
-
-### Audio extraction not working
-- Ensure the video has audio content
-- Try a different video to test
-
-## 📝 Supported Formats
-
-### Video
-- **Format**: MP4 (H.264 video codec)
-- **Qualities**: 144p, 240p, 360p, 480p, 720p, 1080p, 1440p, 2160p (4K)
-- **Codec**: H.264 (AVC)
-
-### Audio
-- **Format**: MP3
-- **Bitrate**: 128kbps - 256kbps
-- **Sample Rate**: 44.1 kHz
-
-### Thumbnail
-- **Format**: JPEG
-- **Resolution**: High-resolution (max: 1280x720 or higher)
-
-## ⚠️ Legal Notice
-
-**Important:** This tool is for personal use only. Use it only for:
-- Videos you own
-- Videos with explicit permission to download
-- Educational purposes
-- Content you have rights to
-
-**Do not use for:**
-- Copyrighted content without permission
-- Violating YouTube's Terms of Service
-- Commercial purposes
-- Redistribution of copyrighted material
-
-Respect creators' rights. Always check video licenses and terms before downloading.
-
-## 📄 License
-
-MIT License - See LICENSE file for details
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
-
-## 💬 Support
-
-For issues, questions, or suggestions, please open an issue on GitHub or contact the maintainers.
-
-## 🔗 Links
-
-- [GitHub Repository](https://github.com/kritikakumari0972-bit/youtube-shorts-downloader)
-- [YouTube Shorts](https://www.youtube.com/shorts/)
-- [ytdl-core Documentation](https://github.com/fent/node-ytdl-core)
-
----
-
-**Made with ❤️ by Kritika**
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the current component and license register. The repository's MIT license applies to NOVA FETCH's original code only, not to third-party components.
