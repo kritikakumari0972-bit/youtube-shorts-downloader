@@ -139,7 +139,12 @@ def _format_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return entries[:16]
 
 
-def _select_media_url(payload: dict[str, Any], page_url: str) -> str | None:
+def _select_media_url(
+    payload: dict[str, Any],
+    page_url: str,
+    quality: str = "best",
+    mode: str = "video",
+) -> str | None:
     # Prefer PeerTube's public HLS manifest: NOVA Native can then apply the
     # requested quality to the playlist's own variants and audio renditions.
     playlists = payload.get("streamingPlaylists") or []
@@ -155,23 +160,42 @@ def _select_media_url(payload: dict[str, Any], page_url: str) -> str | None:
                 if safe:
                     return safe
 
-    # Some public instances disable HLS. Select the highest publicly exposed
-    # progressive file as a native direct-media fallback.
+    # Some public instances disable HLS. Respect the requested quality cap
+    # while choosing among the public progressive files.
     files = payload.get("files") or []
     candidates = []
     if isinstance(files, list):
         for item in files:
             if not isinstance(item, dict):
                 continue
+            if mode == "audio" and item.get("hasAudio") is False:
+                continue
+            if mode != "audio" and item.get("hasVideo") is False:
+                continue
             raw_url = item.get("fileUrl") or item.get("fileDownloadUrl")
             safe = _public_media_url(raw_url, page_url)
             if safe:
                 candidates.append((_resolution(item), _positive_int(item.get("size")), safe))
-    if candidates:
-        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return candidates[0][2]
-    return None
 
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if quality == "best":
+        return candidates[0][2]
+
+    try:
+        cap = int(quality)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        return candidates[0][2]
+    eligible = [item for item in candidates if 0 < item[0] <= cap]
+    if eligible:
+        return eligible[0][2]
+    known = [item for item in candidates if item[0] > 0]
+    if known:
+        return min(known, key=lambda item: (item[0], -item[1]))[2]
+    return candidates[0][2]
 
 def _thumbnail(payload: dict[str, Any], page_url: str) -> str | None:
     thumbnails = payload.get("thumbnails")
@@ -202,6 +226,12 @@ class PeerTubeExtractor:
         )
 
     def extract(self, url: str) -> dict[str, Any] | None:
+        return self._extract_with_context(url, {"quality": "best", "mode": "video"})
+
+    def extract_for_job(self, url: str, context: dict[str, Any]) -> dict[str, Any] | None:
+        return self._extract_with_context(url, context)
+
+    def _extract_with_context(self, url: str, context: dict[str, Any]) -> dict[str, Any] | None:
         video_id = _video_id(url)
         if video_id is None:
             return None
@@ -212,9 +242,13 @@ class PeerTubeExtractor:
             # path rather than pretending the static native engine supports them.
             return None
 
-        media_url = _select_media_url(payload, url)
+        quality = str(context.get("quality") or "best")
+        mode = str(context.get("mode") or "video")
+        media_url = _select_media_url(payload, url, quality=quality, mode=mode)
         if not media_url:
-            raise RuntimeError("This public PeerTube video exposes no downloadable HLS or progressive media file.")
+            raise RuntimeError(
+                "This public PeerTube video exposes no downloadable media file compatible with the requested mode."
+            )
 
         from ... import native_engine
 
@@ -254,7 +288,6 @@ class PeerTubeExtractor:
                 "is_live": False,
             },
         }
-
 
 def register(registry: ExtractorRegistry) -> None:
     registry.register(PeerTubeExtractor())
