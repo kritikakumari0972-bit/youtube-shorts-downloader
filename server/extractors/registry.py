@@ -73,7 +73,12 @@ class ExtractorRegistry:
                 "failure_history_limit": self._recent_failures.maxlen,
             }
 
-    def extract(self, url: str) -> ExtractorMatch | None:
+    def extract(self, url: str, context: dict[str, Any] | None = None) -> ExtractorMatch | None:
+        """Resolve a URL, optionally passing download preferences to contextual adapters.
+
+        Existing extractors remain compatible: only adapters implementing
+        extract_for_job(url, context) receive the job context.
+        """
         # Avoid passing non-web schemes or malformed hosts to plugins.
         parsed = urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
@@ -84,7 +89,11 @@ class ExtractorRegistry:
             try:
                 if not adapter.supports(url):
                     continue
-                result = adapter.extract(url)
+                contextual_extract = getattr(adapter, "extract_for_job", None)
+                if context is not None and callable(contextual_extract):
+                    result = contextual_extract(url, context)
+                else:
+                    result = adapter.extract(url)
                 if result and result.get("media_url"):
                     return ExtractorMatch(str(adapter.name), result)
             except Exception as exc:
