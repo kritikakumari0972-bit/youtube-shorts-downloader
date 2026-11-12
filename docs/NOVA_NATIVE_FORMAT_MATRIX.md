@@ -7,6 +7,7 @@ This document describes the first-party native engine. It is intentionally a sub
 | Source | Native behavior | Notes |
 |---|---|---|
 | Direct HTTP media URL | Supported | Streams to disk with a configurable file-size limit, validated redirects and transient-request retries. |
+| Public PeerTube page | Partial | Resolves `/videos/watch/{id}` and `/w/{shortUUID}` through the same instance's public REST API. Prefers its HLS playlist; uses the highest-resolution public progressive file if HLS is disabled. Live streams are left to the compatibility path. |
 | Public HTML5 page | Partial | Resolves directly exposed video, audio, source, Open Graph, Twitter player-stream and JSON-LD media URLs. It does not run page JavaScript or use browser cookies. |
 | MP3 conversion | Supported with FFmpeg | Converts a locally downloaded audio source. |
 
@@ -58,6 +59,7 @@ A separate audio/video DASH source requires local FFmpeg for the final stream-co
 - DASH XML containing a DOCTYPE or ENTITY declaration is rejected.
 - Encrypted media and access-control circumvention are out of scope.
 - A failed job is not presented as a completed download.
+- Extractor exceptions are isolated. `/api/config` exposes only adapter names and exception classes for recent failures; request URLs and exception text are not retained.
 
 ## Website compatibility
 
