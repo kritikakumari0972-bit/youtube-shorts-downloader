@@ -30,7 +30,7 @@ def tool_status() -> dict[str, Any]:
         version = "installed" if yt_dlp is not None else "not installed"
     registry = get_registry()
     return {
-        "native_engine": "NOVA Native v1.4 · HLS WebVTT Core",
+        "native_engine": "NOVA Native v1.5 · PeerTube Adapter Core",
         "extractors": registry.names(),
         "extractor_diagnostics": registry.diagnostics(),
         "yt_dlp": version,
