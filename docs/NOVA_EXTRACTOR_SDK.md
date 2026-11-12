@@ -55,6 +55,16 @@ NOVA_EXTRACTOR_MODULES=my_package.video_site,my_package.audio_site
 
 Restart NOVA FETCH after changing the variable. The configured adapters appear in `GET /api/config` under `tools.extractors`.
 
+## Built-in public PeerTube adapter
+
+The built-in `nova-peertube` adapter recognizes public `/videos/watch/{id}` and `/w/{shortUUID}` page URLs. It requests the video's public metadata from the same instance using `GET /api/v1/videos/{id}`, without authentication. The adapter prefers a public HLS playlist so NOVA Native can apply its HLS quality selection. When HLS is disabled and public progressive files are listed, it chooses the highest-resolution public file. Live streams are left to the compatibility path.
+
+The adapter does not use account credentials, retrieve private videos, use owner-only source-download endpoints, or bypass any privacy/access restrictions. Every returned media and thumbnail URL is validated before it is used.
+
+## Safe diagnostics
+
+`GET /api/config` exposes adapter names and bounded recent-failure diagnostics under `tools.extractor_diagnostics`. A failure record contains only the adapter name and exception class. It deliberately omits request URLs, query parameters, exception messages and other values that could contain signed URLs or tokens.
+
 ## Contract
 
 Each adapter must provide:
