@@ -101,3 +101,36 @@ def test_default_registry_contains_first_party_adapters():
     assert "nova-direct" in names
     assert "nova-public-html5" in names
     assert "nova-peertube" in names
+
+
+def test_registry_passes_job_context_only_to_contextual_extractors():
+    class ContextualExtractor:
+        name = "contextual"
+        priority = 10
+
+        def supports(self, url):
+            return True
+
+        def extract(self, url):
+            return {"media_url": "https://cdn.example.test/default.mp4"}
+
+        def extract_for_job(self, url, context):
+            return {
+                "media_url": f"https://cdn.example.test/{context['quality']}.mp4",
+                "mode": context["mode"],
+            }
+
+    registry = ExtractorRegistry()
+    registry.register(ContextualExtractor())
+
+    preview = registry.extract("https://example.test/watch/1")
+    download = registry.extract(
+        "https://example.test/watch/1",
+        context={"quality": "720", "mode": "video"},
+    )
+
+    assert preview is not None
+    assert preview.result["media_url"].endswith("/default.mp4")
+    assert download is not None
+    assert download.result["media_url"].endswith("/720.mp4")
+    assert download.result["mode"] == "video"
