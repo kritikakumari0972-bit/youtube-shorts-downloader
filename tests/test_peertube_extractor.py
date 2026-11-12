@@ -190,3 +190,77 @@ def test_peertube_api_redirect_is_followed_by_validated_native_request(monkeypat
     assert result is not None
     assert result["title"] == "Redirected public video"
     assert any(value.endswith("/api/v1/videos/redirected") for value in seen)
+
+
+def test_peertube_progressive_fallback_obeys_requested_quality(monkeypatch):
+    payload = {
+        "name": "Quality choices",
+        "files": [
+            {"fileUrl": "https://cdn.example.test/240.mp4", "height": 240, "size": 100},
+            {"fileUrl": "https://cdn.example.test/480.mp4", "height": 480, "size": 300},
+            {"fileUrl": "https://cdn.example.test/720.mp4", "height": 720, "size": 500},
+            {"fileUrl": "https://cdn.example.test/1080.mp4", "height": 1080, "size": 900},
+        ],
+    }
+    install_client(monkeypatch, {API_PATH: payload})
+
+    result = PeerTubeExtractor().extract_for_job(
+        PAGE_URL, {"quality": "720", "mode": "video"}
+    )
+
+    assert result is not None
+    assert result["media_url"] == "https://cdn.example.test/720.mp4"
+
+
+def test_peertube_progressive_fallback_selects_lowest_available_below_quality_cap(monkeypatch):
+    payload = {
+        "name": "Quality floor",
+        "files": [
+            {"fileUrl": "https://cdn.example.test/720.mp4", "height": 720, "size": 500},
+            {"fileUrl": "https://cdn.example.test/1080.mp4", "height": 1080, "size": 900},
+        ],
+    }
+    install_client(monkeypatch, {API_PATH: payload})
+
+    result = PeerTubeExtractor().extract_for_job(
+        PAGE_URL, {"quality": "480", "mode": "video"}
+    )
+
+    assert result is not None
+    assert result["media_url"] == "https://cdn.example.test/720.mp4"
+
+
+def test_peertube_audio_mode_skips_files_without_audio(monkeypatch):
+    payload = {
+        "name": "Audio output",
+        "files": [
+            {"fileUrl": "https://cdn.example.test/video-only.mp4", "height": 1080,
+             "size": 900, "hasAudio": False, "hasVideo": True},
+            {"fileUrl": "https://cdn.example.test/with-audio.mp4", "height": 720,
+             "size": 500, "hasAudio": True, "hasVideo": True},
+        ],
+    }
+    install_client(monkeypatch, {API_PATH: payload})
+
+    result = PeerTubeExtractor().extract_for_job(
+        PAGE_URL, {"quality": "best", "mode": "audio"}
+    )
+
+    assert result is not None
+    assert result["media_url"] == "https://cdn.example.test/with-audio.mp4"
+
+
+def test_peer_tube_extractor_default_preview_uses_best_file(monkeypatch):
+    payload = {
+        "name": "Preview default",
+        "files": [
+            {"fileUrl": "https://cdn.example.test/360.mp4", "height": 360},
+            {"fileUrl": "https://cdn.example.test/1080.mp4", "height": 1080},
+        ],
+    }
+    install_client(monkeypatch, {API_PATH: payload})
+
+    result = PeerTubeExtractor().extract(PAGE_URL)
+
+    assert result is not None
+    assert result["media_url"] == "https://cdn.example.test/1080.mp4"
