@@ -4,6 +4,7 @@ import importlib
 import os
 import pkgutil
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -35,11 +36,20 @@ class ExtractorRegistry:
         self._extractors: list[Extractor] = []
         self._names: set[str] = set()
         self._lock = threading.RLock()
+        self._recent_failures = deque(maxlen=25)
 
     def register(self, extractor: Extractor) -> None:
         name = str(getattr(extractor, "name", "")).strip()
         if not name:
             raise ValueError("Every extractor must have a non-empty name.")
+        if not callable(getattr(extractor, "supports", None)):
+            raise TypeError(f"Extractor '{name}' must implement supports(url).")
+        if not callable(getattr(extractor, "extract", None)):
+            raise TypeError(f"Extractor '{name}' must implement extract(url).")
+        try:
+            int(getattr(extractor, "priority", 100))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Extractor '{name}' priority must be an integer.") from exc
         with self._lock:
             if name in self._names:
                 raise ValueError(f"Extractor '{name}' is already registered.")
@@ -53,6 +63,15 @@ class ExtractorRegistry:
     def names(self) -> list[str]:
         with self._lock:
             return [str(item.name) for item in self._extractors]
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return safe adapter diagnostics without exposing source URLs or tokens."""
+        with self._lock:
+            return {
+                "registered": [str(item.name) for item in self._extractors],
+                "recent_failures": list(self._recent_failures),
+                "failure_history_limit": self._recent_failures.maxlen,
+            }
 
     def extract(self, url: str) -> ExtractorMatch | None:
         # Avoid passing non-web schemes or malformed hosts to plugins.
@@ -68,9 +87,15 @@ class ExtractorRegistry:
                 result = adapter.extract(url)
                 if result and result.get("media_url"):
                     return ExtractorMatch(str(adapter.name), result)
-            except Exception:
+            except Exception as exc:
                 # One adapter failing must not disable other independently
-                # registered adapters. Diagnostics are returned by the caller.
+                # registered adapters. Do not retain the URL or exception text:
+                # either may contain user-supplied tokens or signed query values.
+                with self._lock:
+                    self._recent_failures.append({
+                        "extractor": str(getattr(adapter, "name", "unknown")),
+                        "error_type": type(exc).__name__,
+                    })
                 continue
         return None
 
